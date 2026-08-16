@@ -3287,7 +3287,10 @@
 
     function applyWallTexture() {
       if (!wallTexture) return;
-      for (const t of _wallTextureCache.values()) t.anisotropy = getMaxTextureAnisotropy();
+      for (const t of _wallTextureCache.values()) {
+        t.anisotropy = getMaxTextureAnisotropy();
+        t.needsUpdate = true; // re-upload so a live quality change takes effect immediately
+      }
       for (const entry of _texturedMeshes) {
         const { mesh, rx, ry, tint } = entry;
         const m = mesh.material;
@@ -4051,35 +4054,44 @@
       const cx = camera.position.x;
       const cy = camera.position.y;
       const cz = camera.position.z;
-      const maxV = MAX_MAZE_LIGHTS_ACTIVE;
-      const top = [];
-      for (let li = 0; li < mazeCullableLights.length; li++) {
-        const L = mazeCullableLights[li];
-        const p = L.position;
-        const dx = p.x - cx;
-        const dy = p.y - cy;
-        const dz = p.z - cz;
-        let d2 = dx * dx + dz * dz + dy * dy * 0.45;
-        if (L.isSpotLight) d2 *= 0.5;
-        else if (L.isPointLight && p.y < MAZE_CEILING_LIGHT_Y - 0.5) d2 *= 0.65;
-        if (top.length < maxV) {
-          top.push({ L, d2 });
-          if (top.length === maxV) top.sort((a, b) => a.d2 - b.d2);
-        } else if (d2 < top[maxV - 1].d2) {
-          top[maxV - 1] = { L, d2 };
-          let i = maxV - 1;
-          while (i > 0 && top[i].d2 < top[i - 1].d2) {
-            const swap = top[i];
-            top[i] = top[i - 1];
-            top[i - 1] = swap;
-            i--;
+      // Constant per-type counts (12 point + 8 spot) keep NUM_POINT_LIGHTS /
+      // NUM_SPOT_LIGHTS frame-invariant, so three.js never recompiles shaders as
+      // the active set rotates while the player moves. (The old top-20 mixed list
+      // churned the point/spot split on every chunk crossing → multi-frame hitch.)
+      const K_POINT = 12;
+      const K_SPOT = 8;
+      const selected = new Set();
+      const addNearest = (wantSpot, k, bias) => {
+        const top = [];
+        for (let li = 0; li < mazeCullableLights.length; li++) {
+          const L = mazeCullableLights[li];
+          if (L.isSpotLight !== wantSpot) continue;
+          const p = L.position;
+          const dx = p.x - cx;
+          const dy = p.y - cy;
+          const dz = p.z - cz;
+          let d2 = dx * dx + dz * dz + dy * dy * 0.45;
+          if (bias) d2 *= bias;
+          if (top.length < k) {
+            top.push({ L, d2 });
+            if (top.length === k) top.sort((a, b) => a.d2 - b.d2);
+          } else if (d2 < top[k - 1].d2) {
+            top[k - 1] = { L, d2 };
+            let i = k - 1;
+            while (i > 0 && top[i].d2 < top[i - 1].d2) {
+              const swap = top[i];
+              top[i] = top[i - 1];
+              top[i - 1] = swap;
+              i--;
+            }
           }
         }
-      }
-      const visible = new Set();
-      for (let i = 0; i < top.length; i++) visible.add(top[i].L);
+        for (const t of top) selected.add(t.L);
+      };
+      addNearest(false, K_POINT, null);
+      addNearest(true, K_SPOT, 0.5);
       for (let li = 0; li < mazeCullableLights.length; li++) {
-        mazeCullableLights[li].visible = visible.has(mazeCullableLights[li]);
+        mazeCullableLights[li].visible = selected.has(mazeCullableLights[li]);
       }
     }
 
@@ -13774,7 +13786,10 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       if (!navGrid) return;
       const pc = Math.min(navCols - 1, Math.max(0, ((player.position.x - navMinX) / NAV_CELL) | 0));
       const pr = Math.min(navRows - 1, Math.max(0, ((player.position.z - navMinZ) / NAV_CELL) | 0));
-      if (pc === flowPlayerC && pr === flowPlayerR) return;
+      // Rebuild only every ~3 nav cells (~6 units) of movement — a full BFS is a few ms,
+      // so halving/tripling its frequency smooths movement without stale pathing (the
+      // player's cell only moves a few units between rebuilds; enemies steer fine).
+      if (Math.abs(pc - flowPlayerC) + Math.abs(pr - flowPlayerR) < 3) return;
       flowPlayerC = pc;
       flowPlayerR = pr;
 
