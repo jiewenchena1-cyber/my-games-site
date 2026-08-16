@@ -242,7 +242,7 @@
       { id: "moveRight",   label: "Move right",        def: "KeyD" },
       { id: "jump",        label: "Jump",              def: "Space" },
       { id: "aim",         label: "Aim / ADS",         def: "ShiftLeft" },
-      { id: "dash",        label: "Dash",              def: "KeyE" },
+      { id: "dash",        label: "Dash",              def: "KeyC" },
       { id: "reload",      label: "Reload",            def: "KeyR" },
       { id: "heal",        label: "Heal / Med-kit",    def: "KeyF" },
       { id: "fire",        label: "Fire (keyboard)",   def: "KeyV" },
@@ -318,6 +318,11 @@
             const v = o.keyBindings[a.id];
             if (typeof v === "string" && v) gameSettings.keyBindings[a.id] = v;
           }
+        }
+        // Dash was shipped with an accidental default of KeyE (the intended key is C);
+        // migrate any untouched save so C works out of the box.
+        if (gameSettings.keyBindings.dash === "KeyE") {
+          gameSettings.keyBindings.dash = "KeyC";
         }
         if (typeof o.serverMode === "string" && ["default", "manual", "local"].includes(o.serverMode)) {
           gameSettings.serverMode = o.serverMode;
@@ -1106,6 +1111,13 @@
     socket.on("connect", () => {
       console.log("Connected to server:", socket.id);
       if (activeRoomId && MULTIPLAYER) emitJoinRoomWithAck();
+    });
+    // On back/forward (bfcache) restore the WebSocket is frozen and killed — force a
+    // clean reconnect so multiplayer resumes instead of sitting on a dead socket.
+    window.addEventListener("pageshow", (e) => {
+      if (e.persisted && typeof socket.connect === "function") {
+        try { socket.connect(); } catch (_) {}
+      }
     });
     socket.on("connect_error", (err) => {
       console.warn("Socket connect_error:", err?.message || err);
@@ -9274,7 +9286,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       thump.stop(now + 0.14);
     }
 
-    const DISSOLVE_DURATION = 0.82;
+    const DISSOLVE_DURATION = 0.55;
     const MAX_DISSOLVE_MESHES = 200;
     const DISSOLVE_BOX_GEO = new THREE.BoxGeometry(0.05, 0.05, 0.05);
     const DISSOLVE_BOX_GEO_SM = new THREE.BoxGeometry(0.035, 0.035, 0.035);
@@ -9325,7 +9337,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           );
         }
         _dissolveDir.normalize();
-        const speed = (small ? 1.8 : 2.2) + Math.random() * 3.2;
+        const speed = (small ? 3.2 : 4.2) + Math.random() * 4.0;
         dissolveGroup.add(shard);
         particles.push({
           mesh: shard,
