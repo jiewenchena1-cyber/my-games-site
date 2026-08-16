@@ -5909,6 +5909,8 @@
       return wi === 5 ? 0.94 : 0.98;
     }
 
+    let _lastHudHtml = "";
+
     function updateHud() {
       const w = weapon();
       const bossRoundInfo = CURRENT_MAP === "boss_arena" ? ` [Round ${BOSS_ROUND}]` : "";
@@ -8091,7 +8093,6 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
     let _bossShakeBarEl = null;
     let _bossShakeBarFillEl = null;
     let _bossShakeBarLabelEl = null;
-    let _lastHudHtml = "";
     let _healthBarKey = "";
     let _needleHudKey = "";
 
