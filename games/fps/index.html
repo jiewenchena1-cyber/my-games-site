@@ -347,12 +347,6 @@
       --game-font-ui: "Audiowide", "Noto Sans", "Noto Sans SC", "Noto Sans TC", "Noto Sans JP", "Noto Sans KR", "Noto Sans Arabic", "Noto Sans Devanagari", ui-sans-serif, system-ui, sans-serif;
     }
 
-    #app {
-      position: fixed;
-      inset: 0;
-      z-index: 1;
-    }
-
     html, body {
       margin: 0;
       width: 100%;
@@ -499,7 +493,6 @@
       z-index: 10;
     }
 
-    .blind-overlay { display: none !important; }
     .blind-text {
       position: fixed;
       left: 50%;
@@ -744,8 +737,7 @@
                                 not a transparent gap to the body underneath. */
     }
     /* The menu-wall 3D scene is always on. The img remains visible underneath it;
-       the WebGL canvas paints over the top of the img. The .menu-wall-on class
-       is no longer used to hide the img. */
+       the WebGL canvas paints over the top of the img. */
     /* (intentionally no rule hiding #menuBg) */
 
     .menu {
@@ -764,13 +756,9 @@
     }
 
     /* Full-screen menu wallpaper (--game-ui-menu-bg is set from head + runtime probe). Was unset → wallpaper appeared “missing”.
-       When the (Experimental) animated background light visual toggle is OFF (the default),
-       this is the menu's background. When the toggle is ON, the WebGL canvas paints the wall
-       instead, and this background is hidden via the .menu-wall-on class on <body>.
-       Note: the actual visible menu background is the <img id="menuBg"> element
-       below. The .menu::before is kept only to provide a stacking context for
-       the menu children (.menu > * { position: relative; z-index: 1 }) — it
-       has no visible background. */
+       The menu background is the <img id="menuBg"> element below; .menu::before is kept only
+       to provide a stacking context for the menu children (.menu > * { position: relative; z-index: 1 })
+       — it has no visible background. */
     .menu::before {
       content: "";
       position: fixed;
@@ -779,10 +767,6 @@
       background: transparent;
       pointer-events: none;
     }
-    body.menu-wall-on .menu::before {
-      background: transparent;
-    }
-
     .menu > * {
       position: relative;
       z-index: 1;
@@ -807,6 +791,17 @@
       box-shadow: none !important;
       width: auto !important;
       padding: 8px !important;
+      cursor: pointer;
+      opacity: 0.85;
+      transition: opacity 0.15s;
+      z-index: 102;
+    }
+    .menu-float-icon:hover { opacity: 1; }
+    .menu-float-icon--dim { opacity: 0.82; }
+    .menu-back-btn {
+      top: 14px;
+      left: 14px;
+      z-index: 105;
     }
     .menu button:not(.menu-float-icon) {
       box-sizing: border-box;
@@ -840,6 +835,58 @@
       background-size: 100% 100% !important;
       background-repeat: no-repeat !important;
       background-color: transparent !important;
+    }
+
+    .btn-primary {
+      font-family: var(--game-font-ui);
+      padding: 10px 30px;
+      border: 2px solid #4fd1ff;
+      border-radius: 8px;
+      color: #fff;
+      cursor: pointer;
+      font-size: 15px;
+      letter-spacing: 1px;
+    }
+    .boss-count-btn {
+      font-family: var(--game-font-ui);
+      padding: 6px 14px;
+      border: 2px solid #4fd1ff;
+      border-radius: 6px;
+      color: #fff;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .pvp-map-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 12px;
+      border: 2px solid #4fd1ff;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: border-color .2s, transform .15s;
+    }
+    .pvp-map-card:hover { border-color: #fff; transform: scale(1.04); }
+    .menu-title {
+      font-family: var(--game-font-ui);
+      font-size: 28px;
+      margin: 0 0 14px 0;
+      letter-spacing: 3px;
+    }
+    .menu-subtitle {
+      font-family: var(--game-font-ui);
+      font-size: 24px;
+      letter-spacing: 2px;
+    }
+    .menu-desc {
+      font-family: var(--game-font-ui);
+      font-size: 12px;
+      opacity: 0.78;
+      margin: 0 0 8px 0;
+      max-width: 320px;
+      text-align: center;
+      line-height: 1.45;
     }
 
     /* Pause / death / name modal: frosted flat buttons (no texture) */
@@ -881,28 +928,31 @@
       width: 100%;
     }
 
-    #settingsModal {
-      position: fixed;
-      inset: 0;
-      z-index: 110;
+    .menu-subpanel {
       display: none;
-      justify-content: center;
+      flex-direction: column;
       align-items: center;
-      background: rgba(0,0,0,0.72);
-      backdrop-filter: blur(6px);
+      gap: 10px;
+      position: relative;
+      padding-top: 20px;
     }
+    .menu-subpanel--wide { gap: 14px; }
 
-    /* ── Achievements modal (mirrors settings modal) ── */
-    #achievementsModal {
+    #settingsModal,
+    #achievementsModal,
+    #nameModal {
       position: fixed;
       inset: 0;
-      z-index: 115;            /* above settingsModal in case both are ever open */
       display: none;
       justify-content: center;
       align-items: center;
       background: rgba(0,0,0,0.72);
       backdrop-filter: blur(6px);
     }
+    #settingsModal,
+    #nameModal { z-index: 110; }
+    /* Achievements modal sits above settingsModal in case both are ever open */
+    #achievementsModal { z-index: 115; }
     #achievementsModal.open { display: flex; }
     .ach-modal-shell {
       position: relative;
@@ -2065,77 +2115,77 @@
       <button type="button" id="btnTraining" data-i18n="btnTrainingCamp">Training Camp</button>
     </div>
     <!-- Floating settings gear — top-right, only visible in menu -->
-    <button type="button" id="btnMenuSettings" class="menu-float-icon" title="Settings" style="position:fixed;top:16px;right:16px;z-index:102;background:none;border:none;cursor:pointer;padding:8px;opacity:0.82;transition:opacity 0.15s;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.82'"><svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+    <button type="button" id="btnMenuSettings" class="menu-float-icon menu-float-icon--dim" title="Settings" style="top:16px;right:16px"><svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
     <!-- Floating achievements trophy — bottom-right, only visible in menu -->
-    <button type="button" id="btnAchievements" class="menu-float-icon" title="Achievements" style="position:fixed;bottom:72px;right:16px;z-index:102;background:none;border:none;cursor:pointer;padding:8px;opacity:0.82;transition:opacity 0.15s;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.82'"><svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2z"/></svg></button>
+    <button type="button" id="btnAchievements" class="menu-float-icon menu-float-icon--dim" title="Achievements" style="bottom:72px;right:16px"><svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2z"/></svg></button>
     <!-- START submenu: Zombie Arena | Boss Fight | PVP -->
-    <div id="menuStart" style="display:none;flex-direction:column;align-items:center;gap:10px;position:relative;padding-top:20px;">
-      <button type="button" id="btnStartBack" class="menu-float-icon" style="position:fixed;top:14px;left:14px;background:none;border:none;cursor:pointer;padding:6px;opacity:0.85;transition:opacity 0.15s;z-index:105;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.85'"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+    <div id="menuStart" class="menu-subpanel">
+      <button type="button" id="btnStartBack" class="menu-float-icon menu-back-btn"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
       <h2 data-i18n="chooseModeToPlay" style="font-family:var(--game-font-ui);font-size:20px;letter-spacing:2px;margin:0 0 4px 0;opacity:0.85;">CHOOSE A MODE TO PLAY</h2>
       <button type="button" id="btnArena" data-i18n="btnZombieArena">Zombie Arena</button>
       <button type="button" id="btnBossFight" data-i18n="btnBossFight">BOSS FIGHT</button>
       <button type="button" id="btnCrossfire" data-i18n="btnCrossfire">PVP</button>
     </div>
-    <div id="menuArenaMode" style="display:none;flex-direction:column;align-items:center;gap:10px;position:relative;padding-top:20px;">
-      <h2 id="menuZombieArenaHeading" style="font-family:var(--game-font-ui);font-size:28px;margin:0 0 14px 0;letter-spacing:3px;" data-i18n="zombieArenaTitle">ZOMBIE ARENA</h2>
+    <div id="menuArenaMode" class="menu-subpanel">
+      <h2 id="menuZombieArenaHeading" class="menu-title" data-i18n="zombieArenaTitle">ZOMBIE ARENA</h2>
       <button type="button" id="btnArenaSingle" data-i18n="btnSingleplayer">SINGLEPLAYER</button>
       <button type="button" id="btnArenaCoop" data-i18n="btnCoopMode">CO-OP MODE</button>
-      <button type="button" id="btnArenaBack" class="menu-float-icon" style="position:fixed;top:14px;left:14px;background:none;border:none;cursor:pointer;padding:6px;opacity:0.85;transition:opacity 0.15s;z-index:105;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.85'"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+      <button type="button" id="btnArenaBack" class="menu-float-icon menu-back-btn"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
     </div>
-    <div id="menuBossMode" style="display:none;flex-direction:column;align-items:center;gap:10px;position:relative;padding-top:20px;">
-      <h2 data-i18n="bossFightTitle" style="font-family:var(--game-font-ui);font-size:28px;margin:0 0 14px 0;letter-spacing:3px;">BOSS FIGHT</h2>
-      <p data-i18n="bossFightDesc" style="font-family:var(--game-font-ui);font-size:12px;opacity:0.78;margin:0 0 8px 0;max-width:320px;text-align:center;line-height:1.45;">Fight the Boss (Hormone Zombie) — a hulking boss that switches between Tank, Speed, and Gunner modes.</p>
-      <button type="button" id="btnBossSingle" class="btn-texture" data-i18n="btnSingleplayer" style="font-family:var(--game-font-ui);padding:10px 30px;border:2px solid #4fd1ff;border-radius:8px;color:#fff;cursor:pointer;font-size:15px;letter-spacing:1px;">SINGLEPLAYER</button>
-      <button type="button" id="btnBossCoop" class="btn-texture" data-i18n="btnCoopMode" style="font-family:var(--game-font-ui);padding:10px 30px;border:2px solid #4fd1ff;border-radius:8px;color:#fff;cursor:pointer;font-size:15px;letter-spacing:1px;">CO-OP MODE</button>
-      <button type="button" id="btnBossBack" class="menu-float-icon" style="position:fixed;top:14px;left:14px;background:none;border:none;cursor:pointer;padding:6px;opacity:0.85;transition:opacity 0.15s;z-index:105;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.85'"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+    <div id="menuBossMode" class="menu-subpanel">
+      <h2 data-i18n="bossFightTitle" class="menu-title">BOSS FIGHT</h2>
+      <p data-i18n="bossFightDesc" class="menu-desc">Fight the Boss (Hormone Zombie) — a hulking boss that switches between Tank, Speed, and Gunner modes.</p>
+      <button type="button" id="btnBossSingle" class="btn-texture btn-primary" data-i18n="btnSingleplayer">SINGLEPLAYER</button>
+      <button type="button" id="btnBossCoop" class="btn-texture btn-primary" data-i18n="btnCoopMode">CO-OP MODE</button>
+      <button type="button" id="btnBossBack" class="menu-float-icon menu-back-btn"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
     </div>
-    <div id="menuBossDifficulty" style="display:none;flex-direction:column;align-items:center;gap:10px;position:relative;padding-top:20px;">
-      <h2 data-i18n="selectDifficulty" style="font-family:var(--game-font-ui);font-size:24px;margin:0 0 10px 0;letter-spacing:2px;">SELECT DIFFICULTY</h2>
+    <div id="menuBossDifficulty" class="menu-subpanel">
+      <h2 data-i18n="selectDifficulty" class="menu-subtitle" style="margin:0 0 10px 0">SELECT DIFFICULTY</h2>
       <div id="bossCountRow" style="display:flex;gap:8px;align-items:center;margin-bottom:4px;transition:opacity 0.15s;">
         <span data-i18n="bossesLabel" style="font-family:var(--game-font-ui);font-size:13px;letter-spacing:1px;">BOSSES:</span>
-        <button type="button" class="bossDiffBtn btn-texture" data-boss-count="1" style="font-family:var(--game-font-ui);padding:6px 14px;border:2px solid #4fd1ff;border-radius:6px;color:#fff;cursor:pointer;font-size:14px;">1</button>
-        <button type="button" class="bossDiffBtn btn-texture" data-boss-count="2" style="font-family:var(--game-font-ui);padding:6px 14px;border:2px solid #4fd1ff;border-radius:6px;color:#fff;cursor:pointer;font-size:14px;">2</button>
-        <button type="button" class="bossDiffBtn btn-texture" data-boss-count="3" style="font-family:var(--game-font-ui);padding:6px 14px;border:2px solid #4fd1ff;border-radius:6px;color:#fff;cursor:pointer;font-size:14px;">3</button>
+        <button type="button" class="bossDiffBtn btn-texture boss-count-btn" data-boss-count="1">1</button>
+        <button type="button" class="bossDiffBtn btn-texture boss-count-btn" data-boss-count="2">2</button>
+        <button type="button" class="bossDiffBtn btn-texture boss-count-btn" data-boss-count="3">3</button>
       </div>
       <button type="button" id="btnBossHell" class="btn-texture" data-i18n="hellMode" style="font-family:var(--game-font-ui);padding:8px 22px;border:2px solid #ff2244;border-radius:6px;color:#ff4466;cursor:pointer;font-size:14px;letter-spacing:1px;">HELL MODE</button>
-      <button type="button" id="btnBossStartDiff" class="btn-texture" data-i18n="btnStart" style="font-family:var(--game-font-ui);padding:10px 30px;border:2px solid #4fd1ff;border-radius:8px;color:#fff;cursor:pointer;font-size:15px;letter-spacing:1px;">START</button>
-      <button type="button" id="btnBossDiffBack" class="menu-float-icon" style="position:fixed;top:14px;left:14px;background:none;border:none;cursor:pointer;padding:6px;opacity:0.85;transition:opacity 0.15s;z-index:105;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.85'"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+      <button type="button" id="btnBossStartDiff" class="btn-texture btn-primary" data-i18n="btnStart">START</button>
+      <button type="button" id="btnBossDiffBack" class="menu-float-icon menu-back-btn"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
     </div>
-    <div id="menuTrainingMode" style="display:none;flex-direction:column;align-items:center;gap:10px;position:relative;padding-top:20px;">
-      <h2 id="menuTrainingHeading" style="font-family:var(--game-font-ui);font-size:28px;margin:0 0 14px 0;letter-spacing:3px;" data-i18n="trainingCampTitle">TRAINING CAMP</h2>
-      <p id="menuTrainingDesc" style="font-family:var(--game-font-ui);font-size:12px;opacity:0.78;margin:0 0 8px 0;max-width:320px;text-align:center;line-height:1.45;" data-i18n="trainingCampDesc">Shoot moving player-model dummies. Head / body / leg hits score differently.</p>
+    <div id="menuTrainingMode" class="menu-subpanel">
+      <h2 id="menuTrainingHeading" class="menu-title" data-i18n="trainingCampTitle">TRAINING CAMP</h2>
+      <p id="menuTrainingDesc" class="menu-desc" data-i18n="trainingCampDesc">Shoot moving player-model dummies. Head / body / leg hits score differently.</p>
       <button type="button" id="btnTrainingSingle" data-i18n="btnSingleplayer">SINGLEPLAYER</button>
       <button type="button" id="btnTrainingCoop" data-i18n="btnCoopMode">CO-OP MODE</button>
-      <button type="button" id="btnTrainingBack" class="menu-float-icon" style="position:fixed;top:14px;left:14px;background:none;border:none;cursor:pointer;padding:6px;opacity:0.85;transition:opacity 0.15s;z-index:105;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.85'"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+      <button type="button" id="btnTrainingBack" class="menu-float-icon menu-back-btn"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
     </div>
-    <div id="menuPvpMaps" style="display:none;flex-direction:column;align-items:center;gap:14px;position:relative;padding-top:20px;">
-      <h2 data-i18n="selectMap" style="font-family:var(--game-font-ui);font-size:24px;margin:0 0 4px 0;letter-spacing:2px;">SELECT MAP</h2>
+    <div id="menuPvpMaps" class="menu-subpanel menu-subpanel--wide">
+      <h2 data-i18n="selectMap" class="menu-subtitle" style="margin:0 0 4px 0">SELECT MAP</h2>
       <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;">
-        <button type="button" id="btnPvpMapClassic" class="btn-texture" style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 12px;border:2px solid #4fd1ff;border-radius:10px;cursor:pointer;transition:border-color .2s,transform .15s;" onmouseenter="this.style.borderColor='#fff';this.style.transform='scale(1.04)'" onmouseleave="this.style.borderColor='#4fd1ff';this.style.transform='scale(1)'">
+        <button type="button" id="btnPvpMapClassic" class="btn-texture pvp-map-card">
           <canvas id="pvpPreviewClassic" width="220" height="130" style="border-radius:6px;background:#1a2233;"></canvas>
           <span style="font-family:var(--game-font-ui);font-size:13px;letter-spacing:1px;color:#e8ecf2;" data-i18n="pvpMapClassic">CLASSIC (ORIGINAL)</span>
         </button>
-        <button type="button" id="btnPvpMapGrid" class="btn-texture" style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 12px;border:2px solid #4fd1ff;border-radius:10px;cursor:pointer;transition:border-color .2s,transform .15s;" onmouseenter="this.style.borderColor='#fff';this.style.transform='scale(1.04)'" onmouseleave="this.style.borderColor='#4fd1ff';this.style.transform='scale(1)'">
+        <button type="button" id="btnPvpMapGrid" class="btn-texture pvp-map-card">
           <canvas id="pvpPreviewGrid" width="220" height="130" style="border-radius:6px;background:#1a2233;"></canvas>
           <span style="font-family:var(--game-font-ui);font-size:13px;letter-spacing:1px;color:#e8ecf2;" data-i18n="pvpMapGrid">GRID KILLHOUSE</span>
         </button>
       </div>
-      <button type="button" id="btnPvpMapBack" class="menu-float-icon" style="position:fixed;top:14px;left:14px;background:none;border:none;cursor:pointer;padding:6px;opacity:0.85;transition:opacity 0.15s;z-index:105;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.85'"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+      <button type="button" id="btnPvpMapBack" class="menu-float-icon menu-back-btn"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
     </div>
-    <div id="menuLobby" style="display:none;flex-direction:column;align-items:center;gap:10px;position:relative;padding-top:20px;">
-      <h2 id="lobbyTitle" data-i18n="lobbyMultiplayer" style="font-family:var(--game-font-ui);font-size:24px;margin:0 0 10px 0;letter-spacing:2px;">MULTIPLAYER</h2>
+    <div id="menuLobby" class="menu-subpanel">
+      <h2 id="lobbyTitle" data-i18n="lobbyMultiplayer" class="menu-subtitle" style="margin:0 0 10px 0">MULTIPLAYER</h2>
       <p id="lobbyError" style="font-family:var(--game-font-ui);color:#e53e3e;font-size:13px;margin:0 0 4px 0;min-height:18px;max-width:320px;text-align:center;line-height:1.35;"></p>
       <button type="button" id="btnQuickplay" data-i18n="btnQuickPlay">QUICK PLAY</button>
       <button type="button" id="btnCreateRoom" data-i18n="btnCreateRoom">CREATE A ROOM</button>
       <button type="button" id="btnJoinCode" data-i18n="btnJoinViaCode">JOIN VIA CODE</button>
-      <button type="button" id="btnLobbyBack" class="menu-float-icon" style="position:fixed;top:14px;left:14px;background:none;border:none;cursor:pointer;padding:6px;opacity:0.85;transition:opacity 0.15s;z-index:105;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.85'"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+      <button type="button" id="btnLobbyBack" class="menu-float-icon menu-back-btn"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
     </div>
-    <div id="menuJoinCode" style="display:none;flex-direction:column;align-items:center;gap:10px;position:relative;padding-top:20px;">
-      <h2 style="font-family:var(--game-font-ui);font-size:24px;margin:0 0 6px 0;letter-spacing:2px;" data-i18n="joinViaCodeTitle">JOIN VIA CODE</h2>
+    <div id="menuJoinCode" class="menu-subpanel">
+      <h2 class="menu-subtitle" style="margin:0 0 6px 0" data-i18n="joinViaCodeTitle">JOIN VIA CODE</h2>
       <input id="codeInput" type="text" maxlength="12" placeholder="ROOM CODE" data-i18n-placeholder="roomCodePlaceholder" style="font-family:var(--game-font-ui);width:180px;padding:10px 14px;font-size:18px;border:2px solid #4fd1ff;border-radius:8px;background:#0d111b;color:#fff;outline:none;text-align:center;text-transform:uppercase;letter-spacing:4px;">
       <p id="codeError" style="font-family:var(--game-font-ui);color:#e53e3e;font-size:13px;margin:4px 0 0 0;min-height:18px;"></p>
       <button type="button" id="btnCodeJoin" data-i18n="btnJoin">JOIN</button>
-      <button type="button" id="btnCodeBack" class="menu-float-icon" style="position:fixed;top:14px;left:14px;background:none;border:none;cursor:pointer;padding:6px;opacity:0.85;transition:opacity 0.15s;z-index:105;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.85'"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+      <button type="button" id="btnCodeBack" class="menu-float-icon menu-back-btn"><svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
     </div>
     </div>
   </div>
@@ -2178,7 +2228,6 @@
   </div>
   <div class="hint" id="hint" data-i18n="hintClick">Click anywhere</div>
   <div class="flash" id="flash"></div>
-  <div class="blind-overlay" id="blindOverlay" aria-hidden="true"></div>
   <div class="blind-text" id="blindText" data-i18n="hudSlowed" aria-hidden="true">IMMOBILIZED</div>
   <div class="crosshair" id="crosshair"></div>
   <div id="amrScopeOverlay" class="amr-scope-overlay" aria-hidden="true"></div>
@@ -2238,7 +2287,7 @@
     </div>
   </div>
   <div id="hitDirContainer" style="position:fixed;inset:0;z-index:35;pointer-events:none;display:flex;justify-content:center;align-items:center;"></div>
-  <div id="nameModal" style="position:fixed;inset:0;z-index:110;display:none;justify-content:center;align-items:center;background:rgba(0,0,0,0.7);">
+  <div id="nameModal">
     <div style="background:#1a2236;border-radius:14px;padding:32px 38px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.5);">
       <h2 data-i18n="enterYourName" style="font-family:'Audiowide',sans-serif;margin:0 0 16px 0;font-size:22px;">ENTER YOUR NAME</h2>
       <input id="nameInput" type="text" maxlength="16" placeholder="Player" data-i18n-placeholder="playerPlaceholder" style="font-family:'Audiowide',sans-serif;width:200px;padding:10px 14px;font-size:16px;border:2px solid #4fd1ff;border-radius:8px;background:#0d111b;color:#fff;outline:none;text-align:center;">

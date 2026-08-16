@@ -44,11 +44,25 @@ var hit_delay = 0;
 // keydown functions
 function onKeyDown(event) {
   keyState[event.keyCode] = true;
-  console.log(event.keyCode);
 }
 
 function onKeyUp(event) {
   keyState[event.keyCode] = false;
+}
+
+// Shared bounds / draw helpers used by every entity type.
+function inBounds(o) {
+  return o.x >= 0 && o.x <= canvas.width &&
+         o.y >= 0 && o.y <= canvas.height;
+}
+
+function drawRect(o) {
+  ctx.fillStyle = o.color;
+  ctx.fillRect(o.x, o.y, o.width, o.height);
+}
+
+function keepActive(arr) {
+  return arr.filter(function(o) { return o.active; });
 }
 
 
@@ -126,13 +140,11 @@ function Bullet(bullet) {
 }
 
 Bullet.prototype.inBounds = function() {
-  return this.x >= 0 && this.x <= canvas.width &&
-         this.y >= 0 && this.y <= canvas.height;
+  return inBounds(this);
 };
 
 Bullet.prototype.draw = function() {
-  ctx.fillStyle = this.color;
-  ctx.fillRect(this.x, this.y, this.width, this.height);
+  drawRect(this);
 };
 
 Bullet.prototype.update = function() {
@@ -159,13 +171,11 @@ function Enemy() {
 }
 
 Enemy.prototype.inBounds = function() {
-  return this.x >= 0 && this.x <= canvas.width &&
-         this.y >= 0 && this.y <= canvas.height;  
+  return inBounds(this);
 };
 
 Enemy.prototype.draw = function() {
-  ctx.fillStyle = this.color;
-  ctx.fillRect(this.x, this.y, this.width, this.height);
+  drawRect(this);
 };
 
 Enemy.prototype.update = function() {
@@ -203,13 +213,11 @@ function Particle() {
 }
 
 Particle.prototype.inBounds = function() {
-  return this.x >= 0 && this.x <= canvas.width &&
-         this.y >= 0 && this.y <= canvas.height;  
+  return inBounds(this);
 };
 
 Particle.prototype.draw = function() {
-  ctx.fillStyle = this.color;
-  ctx.fillRect(this.x, this.y, this.width, this.height);
+  drawRect(this);
 };
 
 Particle.prototype.update = function() {
@@ -295,9 +303,7 @@ function update() {
     particle.update();
   });
   
-  bParticles = bParticles.filter(function(particle) {
-    return particle.active;
-  });
+  bParticles = keepActive(bParticles);
   
   // shooting
   if(keyState[keyShoot])
@@ -307,9 +313,7 @@ function update() {
     bullet.update();
   });
   
-  pBullets = pBullets.filter(function(bullet) {
-    return bullet.active;
-  });
+  pBullets = keepActive(pBullets);
   
   if(w_delay > 0)
     w_delay -= player.getCD();
@@ -322,9 +326,7 @@ function update() {
     enemy.update();
   });
   
-  enemies = enemies.filter(function(enemy) {
-    return enemy.active;
-  });
+  enemies = keepActive(enemies);
   
   // collision
   collisionOccurs();
