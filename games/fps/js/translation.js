@@ -2065,7 +2065,15 @@ const BTN_EXTRAS_EN = {
   enterYourName: "ENTER YOUR NAME", playerPlaceholder: "Player",
   settingsTabData: "DATA", settingsTabHotbar: "HOTBAR",
   devGunPickup: "Got ～～～ — press / to equip",
-  achSlotsFull: "Full (5/5)"
+  achSlotsFull: "Full (5/5)",
+  // Revive flow (non-crossfire modes). Other locales fall back to these until translated.
+  reviveTitle: "DEFEATED",
+  revivePrompt: "WATCH AN AD TO REVIVE",
+  btnReviveWatchAd: "REVIVE",
+  btnGiveUp: "GIVE UP",
+  reviveAdLoading: "AD LOADING…",
+  reviveAdError: "AD FAILED — TRY AGAIN",
+  reviveSuccess: "REVIVED!"
 };
 const BTN_EXTRAS_ZH = {
   btnResume: "继续", btnRestart: "重新开始", btnQuit: "退出", pausedTitle: "已暂停", deathTitle: "失败",

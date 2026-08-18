@@ -87,6 +87,13 @@
     const btnDeathRestart = document.getElementById("btnDeathRestart");
     const btnDeathSettings = document.getElementById("btnDeathSettings");
     const btnDeathQuit = document.getElementById("btnDeathQuit");
+    const revivePrompt = document.getElementById("revivePrompt");
+    const reviveRing = document.getElementById("reviveRing");
+    const reviveCountdownNum = document.getElementById("reviveCountdownNum");
+    const btnReviveWatchAd = document.getElementById("btnReviveWatchAd");
+    const btnReviveGiveUp = document.getElementById("btnReviveGiveUp");
+    const reviveAdSlot = document.getElementById("reviveAdSlot");
+    const reviveAdSlotInner = document.getElementById("reviveAdSlotInner");
     const pauseOverlay = document.getElementById("pauseOverlay");
     const btnResume = document.getElementById("btnResume");
     const btnPauseSettings = document.getElementById("btnPauseSettings");
@@ -811,6 +818,19 @@
       "M133.333 13.0913C184.371 14.8246 229.131 41.3388 256 81C226.143 45.1073 179.905 22.0718 128 22.0718C76.096 22.0718 29.8567 45.107 0 81C26.8684 41.339 71.6293 14.8249 122.666 13.0913L128 0L133.333 13.0913Z";
     let deathAnimTime = 0;
     const DEATH_ANIM_DURATION = 2.0;
+    // Revive flow: 5-second countdown ring; clicking WATCH AD or GIVE UP cancels it.
+    // reviveAdWatchedThisLife persists so the second death in the same match goes
+    // straight to the existing DEFEAT UI. reviveFlowActive gates the rest of the
+    // death-overlay wiring so the existing showDeathScreen() / updateDeathAnim()
+    // code doesn't fight the new UI.
+    const REVIVE_COUNTDOWN_MS = 5000;
+    const REVIVE_RING_CIRC = 2 * Math.PI * 42; // r=42 in the SVG above.
+    let reviveFlowActive = false;
+    let reviveCountdownStartMs = 0;
+    let reviveAdWatchedThisLife = false;
+    let reviveAdInProgress = false;
+    let reviveAdTimerHandle = null;
+    let reviveAdSuccessHandle = null;
     const lastPlayerHitWorld = new THREE.Vector3();
     let localDeathGhostGroup = null;
     let deathCamYaw = 0;
@@ -13461,6 +13481,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       deathOverlay.style.display = "block";
       deathFade.style.background = "rgba(0,0,0,0)";
       deathUI.style.display = "none";
+      // Always hide revive prompt on entry; it will be shown after the death anim if applicable.
+      if (revivePrompt) revivePrompt.style.display = "none";
+      if (reviveAdSlot) reviveAdSlot.style.display = "none";
 
       btnDeathQuit.textContent = "QUIT";
       btnDeathRestart.textContent = MULTIPLAYER ? "RESPAWN" : "RESTART";
@@ -13482,12 +13505,17 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         deathOverlay.style.pointerEvents = "auto";
         deathUI.addEventListener("mouseenter", () => { deathUI.style.opacity = "1"; });
         deathUI.addEventListener("mouseleave", () => { deathUI.style.opacity = "0.25"; });
+        // Crossfire never gets the revive flow.
+        reviveFlowActive = false;
       } else {
         deathScore.textContent = `Score: ${state.score}`;
         deathTitle.textContent = "DEFEAT";
         deathTitle.style.color = "#e53e3e";
         btnDeathRestart.style.display = "";
         deathOverlay.style.pointerEvents = "none";
+        // Non-crossfire modes: delay the death UI until the revive prompt resolves
+        // (or is skipped because the player already revived this life).
+        reviveFlowActive = !reviveAdWatchedThisLife;
       }
     }
 
@@ -13511,8 +13539,14 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       camera.rotation.x = player.pitch;
 
       if (t >= 1 && deathUI.style.display === "none") {
-        deathUI.style.display = "flex";
-        deathOverlay.style.pointerEvents = "auto";
+        // Revive flow takes priority over the legacy death UI for non-crossfire
+        // modes when the player has not already revived this life.
+        if (reviveFlowActive && !isPvpCrossfireMap(CURRENT_MAP)) {
+          startReviveCountdown();
+        } else {
+          deathUI.style.display = "flex";
+          deathOverlay.style.pointerEvents = "auto";
+        }
       }
     }
 
@@ -15625,6 +15659,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       sessionKillCount = 0;
       sessionBossKillCount = 0;
       pvpKillStreak = 0;
+      reviveAdWatchedThisLife = false;
       loadUnlocks();
       setWeapon(0);
 
