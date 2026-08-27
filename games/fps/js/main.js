@@ -6217,6 +6217,28 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       return hit;
     }
 
+    /**
+     * Vertical companion to resolveWallSliding, which is horizontal-only.
+     * Clamps a climb so the player's head does not enter the underside of solid cover, and
+     * a descent so they do not sink through the floor. Returns the resolved eye Y.
+     */
+    function resolveVerticalStep(fromY, stepY) {
+      let toY = fromY + stepY;
+      if (toY <= 1.65) return 1.65;
+      if (stepY <= 0) return toY;
+      const px = player.position.x;
+      const pz = player.position.z;
+      const r = player.radius;
+      forEachNearbyWallBox(px, pz, (box) => {
+        // Only boxes we actually stand under matter.
+        if (px < box.min.x - r || px > box.max.x + r) return;
+        if (pz < box.min.z - r || pz > box.max.z + r) return;
+        // Underside of a box that is above our head now but below where we are heading.
+        if (box.min.y >= fromY && box.min.y < toY) toY = box.min.y;
+      });
+      return toY;
+    }
+
     function resolveWallSliding(nextPos) {
       // v91: corner re-check only — NO substepping. Substepping shortens effective frame motion
       // and makes wall-hug dodges feel sluggish, getting you shot more.
@@ -13893,11 +13915,14 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         const _stepY = state.dashDirY * _speed * dt;
         const _next = player.position.clone().add(new THREE.Vector3(_stepX, _stepY, _stepZ));
         const _resolved = resolveWallSliding(_next);
-        // Apply XZ from the resolver (it only handles horizontal walls) and clamp Y
-        // so we don't tunnel through floors/ceilings.
         player.position.x = _resolved.x;
         player.position.z = _resolved.z;
-        player.position.y = Math.max(1.65, _resolved.y);
+        // resolveWallSliding() starts from player.position and only ever writes .x/.z, so
+        // _resolved.y is just the CURRENT altitude — reading it back silently threw the
+        // vertical part of the step away. Harmless while dashDirY was hard-coded to 0, but
+        // it meant the jet dash could never leave the ground. Apply _stepY ourselves and do
+        // our own floor/ceiling clamp.
+        player.position.y = resolveVerticalStep(player.position.y, _stepY);
         player.velocityY = 0;
         state.dashRemainingDist = Math.max(0, state.dashRemainingDist - _speed * dt);
         // A jet dash genuinely leaves the floor: keep onGround false above the deck so
