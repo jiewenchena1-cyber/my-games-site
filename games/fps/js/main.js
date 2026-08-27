@@ -9860,6 +9860,76 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       if (ud.viewArmL) ud.viewArmL.visible = false;
     }
 
+    /**
+     * Paralysis Dart reload — ONE pose shared by the loader dart mesh and the left glove.
+     *
+     * A reload seats `magSize - reloadStartAmmo` darts, one per equal segment of the reload.
+     * The dart mesh used to run on that per-dart clock while the hand ran on the whole-reload
+     * clock, so the two were never in the same place and the dart appeared to fly into the
+     * muzzle by itself. Both now read this function, so the glove is always physically
+     * carrying the dart it is loading.
+     *
+     * Everything is in gun-local space — the same parent as `animDart` and the grip stubs.
+     */
+    function getDartLoaderPose(ud, p) {
+      const fetchPos = ud.dartFetchPos;
+      const insertPos = ud.dartInsertPos;
+      if (!fetchPos || !insertPos) return null;
+
+      const dartsToLoad = Math.max(1, weapons[6].magSize - state.reloadStartAmmo);
+      const segLen = 1 / dartsToLoad;
+      const dartIdx = Math.min(dartsToLoad - 1, Math.floor(p / segLen));
+      const lp = THREE.MathUtils.clamp((p - dartIdx * segLen) / segLen, 0, 1);
+      const isLastDart = dartIdx >= dartsToLoad - 1;
+
+      // Per-dart beats: pull one from the pouch → line it up on the muzzle → push → seat → let go.
+      // The dart is gone before `release` starts, so the hand is never seen carrying a dart
+      // while it swings back empty.
+      const appear = reloadPhase(lp, 0.02, 0.16);
+      const align = reloadPhase(lp, 0.14, 0.32);
+      const push = reloadPhase(lp, 0.28, 0.68);
+      const seat = reloadPhase(lp, 0.62, 0.8);
+      const vanish = reloadPhase(lp, 0.76, 0.82);
+      const release = reloadPhase(lp, 0.8, 1);
+
+      const easedPush = 1 - Math.pow(1 - push, 3);
+      const carryX = fetchPos.x + (insertPos.x - fetchPos.x) * easedPush;
+      const carryY =
+        fetchPos.y + (insertPos.y - fetchPos.y) * easedPush + Math.sin(push * Math.PI) * 0.05;
+      const carryZ = fetchPos.z + (insertPos.z - fetchPos.z) * easedPush - seat * 0.035;
+      const tilt = THREE.MathUtils.lerp(0.82, 0.02, align);
+
+      // Once the dart is seated the now-empty hand swings back to the pouch for the next one,
+      // so consecutive segments join up instead of snapping.
+      const back = release * release * (3 - 2 * release);
+      // First dart only: ease the glove out of its resting grip instead of teleporting it
+      // to the pouch on the frame the reload starts.
+      const enterT = dartIdx === 0 ? reloadPhase(lp, 0, 0.14) : 1;
+      const enter = enterT * enterT * (3 - 2 * enterT);
+      return {
+        // `enter` also gates the dart so the first one grows in as the hand reaches the
+        // pouch, instead of sitting there waiting to be picked up.
+        dartVisible: lp > 0.02 && lp < 0.82 && enter > 0.05,
+        dartScale: Math.max(0.05, appear) * (1 - vanish) * enter,
+        dartPos: { x: carryX, y: carryY, z: carryZ },
+        dartRot: { x: tilt - seat * 0.16, y: 0.18 * (1 - align), z: tilt * 0.36 },
+        handPos: {
+          x: THREE.MathUtils.lerp(carryX, fetchPos.x, back),
+          y: THREE.MathUtils.lerp(carryY, fetchPos.y, back),
+          z: THREE.MathUtils.lerp(carryZ, fetchPos.z, back),
+        },
+        handRot: {
+          x: 0.3 * (1 - align) + 0.1 * Math.sin(push * Math.PI),
+          y: 0.12 * (1 - align),
+          z: 0.34 * (1 - align),
+        },
+        /** 0..1 — on the last dart the hand returns to its resting grip, not the pouch. */
+        handHome: isLastDart ? back : 0,
+        /** 0..1 — how far the glove has left its resting grip (first dart ramps in). */
+        handEnter: enter,
+      };
+    }
+
     /** R holds the gun; L does mag / rack / charge / shells / bolt. */
     function applyViewArmReload(ud, wi, rp) {
       const p = rp;
@@ -9924,52 +9994,27 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           setViewHandPose(ud.viewArmL, lp, lr, 0, 0.03 * pull, 0.06 * pull, 0, 0, 0);
         }
       } else if (wi === 6) {
-        // Left hand: dips off-screen, reaches up + forward to muzzle, pushes dart, seats, retracts.
-        // Added wrist rotation across phases so the hand reads as gripping/pushing a dart, not
-        // just sliding through space.
-        const fetch = reloadPhase(p, 0, 0.18);
-        const lift = reloadPhase(p, 0.18, 0.32);
-        const push = reloadPhase(p, 0.32, 0.80);
-        const seat = reloadPhase(p, 0.80, 0.95);
-        const retract = reloadPhase(p, 0.92, 1);
-        let dx = 0, dy = 0, dz = 0;
-        let rx = 0, ry = 0, rz = 0;
-        if (fetch > 0 && fetch < 1) {
-          dy = -0.10 * fetch;
-          dz = 0.02 * fetch;
-          rz = 0.35 * fetch;       // wrist rolls inward to "grab" a dart
-          rx = 0.20 * fetch;
-        } else if (lift > 0 && lift < 1) {
-          dy = -0.10 + 0.16 * lift;
-          dz = 0.02 - 0.10 * lift;
-          dx = 0.04 * lift;
-          rz = 0.35 - 0.30 * lift; // wrist rotates to point dart at muzzle
-          rx = 0.20 - 0.15 * lift;
-          ry = 0.10 * lift;
-        } else if (push > 0 && push < 1) {
-          dy = 0.06;
-          dz = -0.08 - 0.06 * push;
-          dx = 0.04;
-          rz = 0.05;
-          rx = 0.05 + 0.08 * Math.sin(push * Math.PI); // slight wrist flex during the push
-          ry = 0.10;
-        } else if (seat > 0 && seat < 1) {
-          dy = 0.06 - 0.04 * seat;
-          dz = -0.14 + 0.04 * seat;
-          dx = 0.04 - 0.02 * seat;
-          rz = 0.05 * (1 - seat);
-          rx = 0.13 * (1 - seat);
-          ry = 0.10 * (1 - seat);
+        // Left hand carries the loader dart from the pouch into the muzzle. Position comes
+        // from the same per-dart pose the dart mesh uses (getDartLoaderPose), so the hand
+        // and the dart can never drift apart the way they did on separate clocks.
+        const pose = getDartLoaderPose(ud, p);
+        const gripL = ud.gripL;
+        if (pose && gripL && ud.viewArmL) {
+          const grip = ud.dartHandGrip;
+          // gun-local → gripL-local (the glove's parent). Grips carry no rotation or scale,
+          // so the conversion is a plain subtraction.
+          let dx = pose.handPos.x + (grip ? grip.x : 0) - gripL.position.x;
+          let dy = pose.handPos.y + (grip ? grip.y : 0) - gripL.position.y;
+          let dz = pose.handPos.z + (grip ? grip.z : 0) - gripL.position.z;
+          // Offsets are measured from the resting grip, so easing the hand in at the start of
+          // the reload and back at the end is just a scalar on the whole offset.
+          const k = pose.handEnter * (1 - pose.handHome);
+          setViewHandPose(
+            ud.viewArmL, lp, lr,
+            dx * k, dy * k, dz * k,
+            pose.handRot.x * k, pose.handRot.y * k, pose.handRot.z * k
+          );
         }
-        if (retract > 0) {
-          dx *= (1 - retract);
-          dy *= (1 - retract);
-          dz *= (1 - retract);
-          rx *= (1 - retract);
-          ry *= (1 - retract);
-          rz *= (1 - retract);
-        }
-        setViewHandPose(ud.viewArmL, lp, lr, dx, dy, dz, rx, ry, rz);
       }
 
       syncHandMagProxy(ud, magInHand, ud.animMag);
@@ -10143,13 +10188,17 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         root.userData.animBolt = boltGrp;
         attachWeaponMag(gunGroup, root, 0, -0.14, 0.1, 0.06, 0.12, 0.11);
         attachEjectPort(gunGroup, root, 0.06, 0.1, 0.2);
-        // AMR gun centered (no x/y offset) when not magnified so the bullet
-        // originates from the crosshair. ADS still applies the per-weapon
-        // adsOffset for the scope-in view.
-        gunGroup.position.set(0, -0.18, -0.96);
+        // Hip pose sits on the right shoulder like every other rifle (the old centered
+        // pose read as if the gun were growing out of the player's chin). Accuracy is
+        // unaffected — tryShoot always casts from camera.position; the muzzle node only
+        // decides where the tracer is drawn from.
+        // ADS pulls it back to x = 0 and lifts the scope axis (local y 0.15) onto the
+        // screen centre — WEAPON_VIEW_DROP_Y (-0.032) + gun.y (-0.118) + 0.15 = 0 — so the
+        // tube lines up with the crosshair right before the scope overlay fades in.
+        gunGroup.position.set(0.25, -0.2, -0.9);
         attachViewHandGrips(gunGroup, root, VIEW_HAND_GRIPS[5]);
         attachViewArmsOnGrips(root);
-        adsOffset.set(-0.18, 0.12, 0.38);
+        adsOffset.set(-0.25, 0.082, 0.32);
 
         const muzzleNode = new THREE.Object3D();
         muzzleNode.position.set(0, 0.1, -0.88);
@@ -10294,8 +10343,13 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       root.userData.basePos = gun.position.clone();
       root.userData.adsOffset = new THREE.Vector3(-0.24, 0.10, 0.26);
       root.userData.animDart = animDart;
-      root.userData.dartFetchPos = new THREE.Vector3(0.14, 0.26, -0.50);
+      // Fetch point is a pouch below/left of the receiver — somewhere a hand can actually
+      // reach. (It used to be up-forward-right of the muzzle, i.e. mid-air, which is why
+      // the loader dart looked like it was floating in on its own.)
+      root.userData.dartFetchPos = new THREE.Vector3(-0.13, -0.26, 0.08);
       root.userData.dartInsertPos = new THREE.Vector3(0, 0.05, -0.26);
+      /** Where the glove sits relative to the dart it is carrying (gun-local). */
+      root.userData.dartHandGrip = new THREE.Vector3(0.005, -0.035, 0.075);
       return root;
     }
 
@@ -10898,35 +10952,16 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           }
         }
       } else if (wi === 6) {
-        // Paralysis Dart: sequential per-dart loading animation.
-        // dartsToLoad = how many darts we are actually loading this reload.
-        const dartsToLoad = Math.max(1, w.magSize - state.reloadStartAmmo);
-        const segLen = 1 / dartsToLoad;
-        const dartIdx = Math.min(dartsToLoad - 1, Math.floor(p / segLen));
-        const lp = (p - dartIdx * segLen) / segLen; // 0..1 within this dart's segment
-
+        // Paralysis Dart: sequential per-dart loading. The pose is shared with the left
+        // glove (see getDartLoaderPose) so the dart is always in the hand loading it.
         const dart = ud.animDart;
-        const fetchPos = ud.dartFetchPos;
-        const insertPos = ud.dartInsertPos;
-        if (dart && fetchPos && insertPos) {
-          const appear = reloadPhase(lp, 0.04, 0.18);
-          const align  = reloadPhase(lp, 0.16, 0.34);
-          const push   = reloadPhase(lp, 0.30, 0.76);
-          const seat   = reloadPhase(lp, 0.70, 0.90);
-          const hide   = reloadPhase(lp, 0.88, 0.98);
-          if (lp < 0.04 || lp > 0.98) {
-            dart.visible = false;
-          } else {
-            dart.visible = true;
-            const easedPush = 1 - Math.pow(1 - push, 3);
-            const sx = fetchPos.x + (insertPos.x - fetchPos.x) * easedPush;
-            const sy = fetchPos.y + (insertPos.y - fetchPos.y) * easedPush + Math.sin(push * Math.PI) * 0.025;
-            const sz = fetchPos.z + (insertPos.z - fetchPos.z) * easedPush - seat * 0.035;
-            dart.position.set(sx, sy, sz);
-            const tilt = THREE.MathUtils.lerp(0.82, 0.02, align);
-            dart.rotation.set(tilt - seat * 0.16, 0.18 * (1 - align), tilt * 0.36);
-            const scale = Math.max(0.05, appear * (1 - hide));
-            dart.scale.setScalar(scale);
+        const pose = getDartLoaderPose(ud, p);
+        if (dart && pose) {
+          dart.visible = pose.dartVisible;
+          if (pose.dartVisible) {
+            dart.position.set(pose.dartPos.x, pose.dartPos.y, pose.dartPos.z);
+            dart.rotation.set(pose.dartRot.x, pose.dartRot.y, pose.dartRot.z);
+            dart.scale.setScalar(pose.dartScale);
           }
         }
       }
@@ -13541,7 +13576,17 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       if (t >= 1 && deathUI.style.display === "none") {
         // Revive flow takes priority over the legacy death UI for non-crossfire
         // modes when the player has not already revived this life.
-        if (reviveFlowActive && !isPvpCrossfireMap(CURRENT_MAP)) {
+        // GUARD: startReviveCountdown() has never been written. Calling it threw a
+        // ReferenceError here — inside animate(), before renderer.render() — so the first
+        // death in arena / boss froze the screen with no DEFEAT buttons. The deployed
+        // main.min.js predates the revive UI and so never hit it; this guard keeps a
+        // rebuilt bundle behaving the same way. Delete the typeof check once the real
+        // countdown exists.
+        if (
+          reviveFlowActive &&
+          !isPvpCrossfireMap(CURRENT_MAP) &&
+          typeof startReviveCountdown === "function"
+        ) {
           startReviveCountdown();
         } else {
           deathUI.style.display = "flex";
