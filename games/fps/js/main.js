@@ -173,6 +173,9 @@
       { l: -1.04, r: -1.12, ly: 0.18, ry: -0.14, lz: 0.24, rz: -0.2 },
       { l: -0.7, r: -0.75, ly: 0, ry: 0, lz: 0, rz: 0 },
       { l: -1.08, r: -1.18, ly: 0.17, ry: -0.13, lz: 0.23, rz: -0.19 },
+      { l: -1.04, r: -1.12, ly: 0.18, ry: -0.14, lz: 0.24, rz: -0.2 },  // 6 dart
+      { l: -0.28, r: -0.78, ly: 0.06, ry: -0.2, lz: 0.12, rz: -0.16 },  // 7 knife (one-handed)
+      { l: -1.1, r: -1.2, ly: 0.18, ry: -0.15, lz: 0.25, rz: -0.21 },   // 8 dev gun
     ];
 
     const REMOTE_WALK_PHASE_LUT = (() => {
@@ -254,6 +257,7 @@
       { id: "heal",        label: "Heal / Med-kit",    def: "KeyF" },
       { id: "fire",        label: "Fire (keyboard)",   def: "KeyV" },
       { id: "speedNeedle", label: "Speed needle",      def: "KeyQ" },
+      { id: "jetHarness",  label: "Jet harness",       def: "KeyP" },
       { id: "questHud",    label: "Toggle quest HUD",  def: "KeyM" },
       { id: "flashlight",  label: "Flashlight",        def: "KeyL" },
       { id: "flashBeam",   label: "Flashlight beam",   def: "KeyZ" },
@@ -792,6 +796,18 @@
     const NEEDLE_INJECT_DUR_MS = 680;   // ms: injection animation
     const NEEDLE_BOOST_MS      = 5000;  // ms: speed ×2
     const NEEDLE_WEAK_MS       = 5000;  // ms: speed ×0.25 (weakness after)
+    // ── Jet harness (P) ─────────────────────────────────────────────────────
+    // Strap-on thruster. Costs JET_STRAP_MS to put on (vulnerable — no firing, no dash),
+    // then for JET_ACTIVE_MS the dash flies along the full look vector instead of staying
+    // horizontal. The dash covers the SAME distance at every angle because the direction is
+    // a unit vector and updatePlayer integrates `dashRemainingDist` along it — straight up
+    // travels exactly as far as straight ahead.
+    const JET_STRAP_MS        = 3000;   // ms: strapping the harness on
+    const JET_ACTIVE_MS       = 10000;  // ms: flight window once it is on
+    /** Drop (world units) that turns a landing lethal. One vertical dash climbs JET_DASH_DIST. */
+    const JET_FATAL_FALL_DROP = 12.0;
+    /** Warn once the player is this far above the surface they last stood on. */
+    const JET_FALL_WARN_DROP  = 9.0;
     let hellLootRing = null;       // 地狱boss死亡光圈
 
     function clearHellLootRing() {
@@ -1166,9 +1182,12 @@
         else if (data.weaponIndex !== undefined && data.weaponIndex !== null) rawWeapon = data.weaponIndex;
         else if (data.w !== undefined && data.w !== null) rawWeapon = data.w;
       }
+      // Clamp to the real weapon range (0..8). This used to be `% 7`, which folded the
+      // knife (7) onto the pistol and the dev gun (8) onto the AR — so you could never tell
+      // an opponent was holding a knife.
       const wNorm =
         rawWeapon !== undefined && rawWeapon !== null
-          ? (((Number(rawWeapon) | 0) % 7) + 7) % 7
+          ? THREE.MathUtils.clamp(Number(rawWeapon) | 0, 0, weapons.length - 1)
           : rp.currentWeapon;
       if (rawWeapon !== undefined && rawWeapon !== null && wNorm !== rp.currentWeapon) {
         try {
@@ -1177,6 +1196,9 @@
       }
       rp.isReloading = !!data.reloading;
       rp.ads = !!data.ads;
+      // Jet harness. Absent field (older client / never used) means 0 — no pack is shown.
+      rp.jetState = THREE.MathUtils.clamp(Number(data.jet) | 0, 0, 2);
+      applyRemoteJetPack(rp);
       rp.remotePitch =
         typeof data.pitch === "number"
           ? THREE.MathUtils.clamp(data.pitch, -1.15, 1.15)
@@ -1910,6 +1932,35 @@
         addMeshPart(g, new THREE.ConeGeometry(0.015, 0.05, 8), mLight, 0, 0.04, -0.27, bz, 0, 0);
         addMeshPart(g, new THREE.BoxGeometry(0.05, 0.14, 0.07), mDark, 0, -0.10, 0.10);
         addMeshPart(g, new THREE.BoxGeometry(0.04, 0.08, 0.06), mBlack, 0, -0.07, 0.04);
+      } else if (type === 4) {
+        // Med kit — white case with a red cross, unmistakable at a distance.
+        const mCase = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.55 });
+        const mCross = new THREE.MeshStandardMaterial({ color: 0xd42020, roughness: 0.5 });
+        const mStrap = new THREE.MeshStandardMaterial({ color: 0x4a3a22, roughness: 0.85 });
+        addMeshPart(g, new THREE.BoxGeometry(0.22, 0.17, 0.13), mCase, 0, 0, 0);
+        addMeshPart(g, new THREE.BoxGeometry(0.115, 0.032, 0.005), mCross, 0, 0, -0.068);
+        addMeshPart(g, new THREE.BoxGeometry(0.032, 0.115, 0.005), mCross, 0, 0, -0.068);
+        addMeshPart(g, new THREE.BoxGeometry(0.23, 0.03, 0.135), mStrap, 0, 0.055, 0);
+        addMeshPart(g, new THREE.BoxGeometry(0.05, 0.022, 0.03), mStrap, 0, 0.098, 0);
+      } else if (type === 7) {
+        // Combat knife — short blade, held point-down in one fist.
+        const mBlade = new THREE.MeshStandardMaterial({ color: 0xd8dee6, roughness: 0.2, metalness: 0.85 });
+        const mGrip = new THREE.MeshStandardMaterial({ color: 0x18181c, roughness: 0.85 });
+        addMeshPart(g, new THREE.BoxGeometry(0.028, 0.006, 0.20), mBlade, 0, 0, -0.13);
+        addMeshPart(g, new THREE.ConeGeometry(0.016, 0.05, 4), mBlade, 0, 0, -0.25, -Math.PI / 2, 0, 0);
+        addMeshPart(g, new THREE.BoxGeometry(0.05, 0.012, 0.016), mBlade, 0, 0, -0.02);
+        addMeshPart(g, new THREE.BoxGeometry(0.024, 0.024, 0.11), mGrip, 0, 0, 0.045);
+        addMeshPart(g, new THREE.BoxGeometry(0.03, 0.03, 0.014), mGrip, 0, 0, 0.105);
+      } else if (type === 8) {
+        // Dev gun — oversized red slab so it never reads as an ordinary rifle.
+        const mDev = new THREE.MeshStandardMaterial({
+          color: 0x901010, roughness: 0.35, metalness: 0.6,
+          emissive: 0xff2200, emissiveIntensity: 0.45,
+        });
+        addMeshPart(g, new THREE.BoxGeometry(0.13, 0.15, 0.5), mDev, 0, 0.01, 0.08);
+        addMeshPart(g, new THREE.CylinderGeometry(0.045, 0.05, 0.44, 12), mDev, 0, 0.05, -0.24, bz, 0, 0);
+        addMeshPart(g, new THREE.BoxGeometry(0.08, 0.18, 0.1), mBlack, 0, -0.14, 0.12);
+        addMeshPart(g, new THREE.BoxGeometry(0.06, 0.06, 0.09), mBlack, 0, 0.11, -0.02);
       }
       return g;
     }
@@ -1951,6 +2002,7 @@
       3: { x: 0.076, y: -0.102, z: -0.05 },
       5: { x: 0.082, y: -0.108, z: -0.08 },
       6: { x: 0.076, y: -0.102, z: -0.04 },
+      8: { x: 0.090, y: -0.115, z: -0.07 },
     };
     /** Right (primary) glove — sits on pistol grip after Y=PI flip, lining up with the right wrist in the shoulder pocket. */
     const REMOTE_PRIMARY_GRIP_LOCAL = {
@@ -1958,8 +2010,11 @@
       1: { x: -0.050, y: -0.105, z: -0.04 },
       2: { x: -0.052, y: -0.108, z: -0.03 },
       3: { x: -0.048, y: -0.102, z: -0.03 },
+      4: { x: 0.000, y: -0.115, z: 0.00 },
       5: { x: -0.052, y: -0.110, z: -0.06 },
       6: { x: -0.046, y: -0.105, z: -0.02 },
+      7: { x: 0.000, y: -0.030, z: 0.07 },
+      8: { x: -0.058, y: -0.120, z: -0.05 },
     };
     /** Right-shoulder rifle pose with bent elbows: shoulders wider (±0.30); arms cross to reach the gun on the right while staying outside the body. */
     const REMOTE_TWO_HAND_STANCE = [
@@ -1967,10 +2022,20 @@
       { holdX: 0.18, holdY: 1.30, holdZ: 0.60, r: { x: -0.85, y: -0.10, z: 0.00 }, l: { x: -0.85, y: 0.55, z: 0.00 } },
       { holdX: 0.18, holdY: 1.30, holdZ: 0.60, r: { x: -0.85, y: -0.10, z: 0.00 }, l: { x: -0.85, y: 0.55, z: 0.00 } },
       { holdX: 0.18, holdY: 1.30, holdZ: 0.60, r: { x: -0.85, y: -0.10, z: 0.00 }, l: { x: -0.85, y: 0.55, z: 0.00 } },
-      null,
+      null, // 4 med kit — one-handed, uses the single-item stance below
       { holdX: 0.18, holdY: 1.30, holdZ: 0.62, r: { x: -0.83, y: -0.10, z: 0.00 }, l: { x: -0.83, y: 0.55, z: 0.00 } },
       { holdX: 0.18, holdY: 1.30, holdZ: 0.60, r: { x: -0.85, y: -0.10, z: 0.00 }, l: { x: -0.85, y: 0.55, z: 0.00 } },
+      null, // 7 knife — one-handed
+      { holdX: 0.18, holdY: 1.30, holdZ: 0.64, r: { x: -0.88, y: -0.10, z: 0.00 }, l: { x: -0.88, y: 0.55, z: 0.00 } },
     ];
+    /**
+     * Med kit (4) and knife (7): carried low in the right fist, left arm hanging. Gives each a
+     * silhouette an opponent can read instantly instead of the old "empty hands" / fake pistol.
+     */
+    const REMOTE_ONE_HAND_STANCE = {
+      4: { holdX: 0.16, holdY: 1.02, holdZ: 0.34, r: { x: -0.55, y: -0.12, z: 0.05 }, l: { x: -0.15, y: 0.05, z: 0.10 } },
+      7: { holdX: 0.19, holdY: 1.06, holdZ: 0.30, r: { x: -0.72, y: -0.18, z: 0.12 }, l: { x: -0.20, y: 0.06, z: 0.12 } },
+    };
 
     function hashRemoteTint(seed) {
       let h = 2166136261;
@@ -2105,8 +2170,59 @@
       return hold;
     }
 
+    /** Med kit (4) and knife (7) are carried in one hand — no support-hand socket. */
+    function isRemoteOneHandItem(wt) {
+      return wt === 4 || wt === 7;
+    }
+
+    /**
+     * Add / remove the visible jet pack on a remote player to match their broadcast state.
+     * Built lazily on first non-zero state and torn down when it returns to 0, so an
+     * opponent who never used the harness never has one attached.
+     */
+    function applyRemoteJetPack(rp) {
+      const st = rp.jetState | 0;
+      if (st <= 0) {
+        if (rp.jetPack) {
+          rp.group.remove(rp.jetPack);
+          rp.jetPack.traverse((o) => {
+            if (o.geometry) o.geometry.dispose();
+            if (o.material) {
+              if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
+              else o.material.dispose();
+            }
+          });
+          rp.jetPack = null;
+        }
+        return;
+      }
+      if (!rp.jetPack) {
+        rp.jetPack = makeRemoteJetPack();
+        rp.group.add(rp.jetPack);
+      }
+      rp.jetPack.visible = true;
+    }
+
+    /** Per-frame flame / glow pulse on a remote pack. Only state 2 (flying) burns. */
+    function updateRemoteJetPack(rp, dt) {
+      const pack = rp.jetPack;
+      if (!pack) return;
+      const flying = (rp.jetState | 0) === 2;
+      rp.jetFlame = dampScalar(rp.jetFlame || 0, flying ? 1 : 0, dt, 10);
+      const flicker = flying ? 0.75 + Math.sin(performance.now() * 0.03) * 0.25 : 0;
+      for (const f of pack.userData.flames) {
+        f.material.opacity = 0.7 * rp.jetFlame * flicker;
+        const s = 0.6 + 0.4 * flicker;
+        f.scale.set(1, s, 1);
+      }
+      if (pack.userData.glow) pack.userData.glow.intensity = 5 * rp.jetFlame * flicker;
+    }
+
     function equipRemotePlayerWeapon(rp, weaponType) {
-      const wt = (((weaponType | 0) % 7) + 7) % 7;
+      // Was `% 7`: the knife folded onto the pistol, the dev gun onto the AR, and the med
+      // kit just hid the hold group so the opponent appeared empty-handed. All nine slots
+      // now have a distinct silhouette.
+      const wt = THREE.MathUtils.clamp(weaponType | 0, 0, weapons.length - 1);
       const gloveMat =
         rp.gloveMat ||
         new THREE.MeshStandardMaterial({ color: 0x3a3528, roughness: 0.9 });
@@ -2119,12 +2235,17 @@
         rp.supportSocket = null;
         rp.primarySocket = null;
       }
-      if (wt === 4) {
-        hold.visible = false;
+      hold.visible = true;
+      if (isRemoteOneHandItem(wt)) {
+        const item = makeThirdPersonGun(wt);
+        applyThirdPersonGunToChestHold(item, wt);
+        hold.add(item);
+        rp.gunModel = item;
+        rp.supportSocket = null;
+        rp.primarySocket = attachRemotePrimaryHand(item, wt, gloveMat);
         rp.currentWeapon = wt;
         return;
       }
-      hold.visible = true;
       const gunModel = makeThirdPersonGun(wt);
       applyThirdPersonGunToChestHold(gunModel, wt);
       hold.add(gunModel);
@@ -2136,7 +2257,7 @@
 
     function applyRemoteTwoHandStance(rp, dt, moving, wSin, idlePhase, adsBlend) {
       const wt = rp.currentWeapon | 0;
-      const stance = REMOTE_TWO_HAND_STANCE[wt];
+      const stance = REMOTE_TWO_HAND_STANCE[wt] || REMOTE_ONE_HAND_STANCE[wt];
       if (!stance) return;
       const breathe = Math.sin(idlePhase) * (moving ? 0.018 : 0.028);
       const holdY = stance.holdY - adsBlend * 0.04 + breathe * 0.15;
@@ -4881,6 +5002,8 @@
       onGround: true,
       /** PvP / spawn: ignore incoming damage until this timestamp (ms). */
       spawnProtectUntil: 0,
+      /** Highest Y reached during the current airborne stretch; null while grounded. */
+      fallApexY: null,
     };
 
     const keys = { w:false, a:false, s:false, d:false, space:false, shift:false, f:false, v:false };
@@ -4932,6 +5055,8 @@
       dashDirZ: 0,
       dashDirY: 0,
       dashRemainingDist: 0,
+      /** True when the in-flight dash was launched with the jet harness on (3D, can climb). */
+      dashIsJet: false,
       // Last horizontal movement direction (world XZ, unit length). Updated every
       // frame the player is actively moving; the dash uses this instead of the
       // camera's look direction. (0, 0) means "no recent movement" → dash forward.
@@ -4941,6 +5066,13 @@
       knifeComboIdx: 0,
       lastKnifeSwing: 0,
       speedNeedle: { phase:'idle', timer:0, animStart:0, charges:1 },
+      /**
+       * Jet harness. phase: 'idle' → 'strapping' (JET_STRAP_MS) → 'active' (JET_ACTIVE_MS) → 'idle'.
+       * `netState` is what gets broadcast so opponents can see it (0 none / 1 strapping / 2 active);
+       * it is only ever non-zero while the phase really is non-idle — an unused harness never
+       * shows on anyone else's screen.
+       */
+      jet: { phase:'idle', startMs:0, endMs:0, charges:1, netState:0 },
     };
 
 
@@ -8132,6 +8264,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
     // Cached per-frame HUD lookups — these elements are never recreated, so we
     // resolve them once and reuse the refs instead of re-querying every frame.
     let _needleHudEl = null;
+    let _jetHudEl = null;
     let _needleLabelEl = null;
     let _needleBarFillEl = null;
     let _bossShakeBarEl = null;
@@ -9699,6 +9832,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
     camera.add(weaponRoot);
     const needleRoot = makeNeedleModel();
     camera.add(needleRoot);
+    const jetRoot = makeJetHarnessModel();
+    camera.add(jetRoot);
 
     /** Camera-space Y offset so the view-model sits ~20px lower on a typical 1080p window (FOV 75). */
     const WEAPON_VIEW_DROP_Y = -0.032;
@@ -10298,6 +10433,129 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       root.userData.baseRot = new THREE.Euler(-0.18, -0.14, 0.22);
       root.visible = false;
       return root;
+    }
+
+    /**
+     * Jet harness view-model, shown only during the 3-second strap-on.
+     *
+     * Layout (camera space): the thruster unit swings in from the lower right and settles
+     * against the chest while two harness straps are pulled across the view and cinched
+     * tight by the gloves. Nozzles light up at the end as the unit spins up.
+     * `userData` exposes the pieces the animation drives.
+     */
+    function makeJetHarnessModel() {
+      const root = new THREE.Group();
+      const rig = new THREE.Group();
+
+      const mShell = new THREE.MeshStandardMaterial({ color: 0x5a6470, roughness: 0.42, metalness: 0.55 });
+      const mShellDark = new THREE.MeshStandardMaterial({ color: 0x2a3038, roughness: 0.6, metalness: 0.4 });
+      const mStrap = new THREE.MeshStandardMaterial({ color: 0x4a4030, roughness: 0.92 });
+      const mBuckle = new THREE.MeshStandardMaterial({ color: 0xb8bcc4, roughness: 0.3, metalness: 0.8 });
+      const mGlove = new THREE.MeshStandardMaterial({ color: 0x2b271e, roughness: 0.86 });
+      const mNozzle = new THREE.MeshStandardMaterial({ color: 0x8a9098, roughness: 0.35, metalness: 0.75 });
+      const mFlame = new THREE.MeshBasicMaterial({ color: 0x66ccff, transparent: true, opacity: 0 });
+
+      // ── Thruster unit (swings in, then locks against the chest) ──
+      const thruster = new THREE.Group();
+      addMeshPart(thruster, new THREE.BoxGeometry(0.20, 0.15, 0.09), mShell, 0, 0, 0);
+      addMeshPart(thruster, new THREE.BoxGeometry(0.155, 0.045, 0.10), mShellDark, 0, 0.055, 0.004);
+      addMeshPart(thruster, new THREE.CylinderGeometry(0.030, 0.036, 0.10, 12), mNozzle, -0.075, -0.10, 0, 0, 0, 0.16);
+      addMeshPart(thruster, new THREE.CylinderGeometry(0.030, 0.036, 0.10, 12), mNozzle, 0.075, -0.10, 0, 0, 0, -0.16);
+      addMeshPart(thruster, new THREE.CylinderGeometry(0.020, 0.020, 0.11, 8), mShellDark, 0, 0.01, -0.06, Math.PI / 2, 0, 0);
+      const flameL = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.11, 10), mFlame.clone());
+      flameL.position.set(-0.078, -0.185, 0);
+      flameL.rotation.z = Math.PI + 0.16;
+      thruster.add(flameL);
+      const flameR = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.11, 10), mFlame.clone());
+      flameR.position.set(0.078, -0.185, 0);
+      flameR.rotation.z = Math.PI - 0.16;
+      thruster.add(flameR);
+      thruster.position.set(0.05, -0.20, -0.42);
+      rig.add(thruster);
+
+      // ── Two harness straps pulled across the chest ──
+      const strapA = new THREE.Group();
+      addMeshPart(strapA, new THREE.BoxGeometry(0.46, 0.035, 0.012), mStrap, 0, 0, 0);
+      addMeshPart(strapA, new THREE.BoxGeometry(0.05, 0.048, 0.02), mBuckle, 0.14, 0, 0.006);
+      strapA.position.set(0, -0.13, -0.38);
+      strapA.rotation.z = 0.34;
+      rig.add(strapA);
+
+      const strapB = new THREE.Group();
+      addMeshPart(strapB, new THREE.BoxGeometry(0.44, 0.032, 0.012), mStrap, 0, 0, 0);
+      addMeshPart(strapB, new THREE.BoxGeometry(0.046, 0.044, 0.02), mBuckle, -0.13, 0, 0.006);
+      strapB.position.set(0, -0.26, -0.38);
+      strapB.rotation.z = -0.28;
+      rig.add(strapB);
+
+      // ── Gloves that pull the straps tight ──
+      const handL = new THREE.Group();
+      addMeshPart(handL, new THREE.BoxGeometry(0.062, 0.05, 0.085), mGlove, 0, 0, 0);
+      addMeshPart(handL, new THREE.BoxGeometry(0.075, 0.075, 0.2), mGlove, 0, -0.012, 0.15);
+      handL.position.set(-0.20, -0.24, -0.34);
+      rig.add(handL);
+
+      const handR = new THREE.Group();
+      addMeshPart(handR, new THREE.BoxGeometry(0.062, 0.05, 0.085), mGlove, 0, 0, 0);
+      addMeshPart(handR, new THREE.BoxGeometry(0.075, 0.075, 0.2), mGlove, 0, -0.012, 0.15);
+      handR.position.set(0.21, -0.20, -0.34);
+      rig.add(handR);
+
+      // The pieces are authored at a comfortable working size; shrink and push the whole rig
+      // away so it reads as gear on your chest rather than a plank held against the lens.
+      rig.scale.setScalar(0.58);
+      rig.position.set(0.02, -0.05, -0.2);
+      root.add(rig);
+      root.userData.rig = rig;
+      root.userData.thruster = thruster;
+      root.userData.strapA = strapA;
+      root.userData.strapB = strapB;
+      root.userData.handL = handL;
+      root.userData.handR = handR;
+      root.userData.flames = [flameL, flameR];
+      root.userData.thrusterHome = thruster.position.clone();
+      root.visible = false;
+      return root;
+    }
+
+    /**
+     * Thruster pack worn on a remote player's back. This is the only thing that tells an
+     * opponent someone has a harness on, so it is created lazily and removed the moment the
+     * broadcast state goes back to 0 — a player who never pressed P never grows one.
+     */
+    function makeRemoteJetPack() {
+      const g = new THREE.Group();
+      const mShell = new THREE.MeshStandardMaterial({ color: 0x5a6470, roughness: 0.42, metalness: 0.55 });
+      const mDark = new THREE.MeshStandardMaterial({ color: 0x2a3038, roughness: 0.6, metalness: 0.4 });
+      const mNozzle = new THREE.MeshStandardMaterial({ color: 0x8a9098, roughness: 0.35, metalness: 0.75 });
+      addMeshPart(g, new THREE.BoxGeometry(0.34, 0.42, 0.16), mShell, 0, 0, 0);
+      addMeshPart(g, new THREE.BoxGeometry(0.26, 0.08, 0.17), mDark, 0, 0.14, 0.004);
+      addMeshPart(g, new THREE.CylinderGeometry(0.055, 0.065, 0.16, 12), mNozzle, -0.13, -0.27, 0, 0, 0, 0.12);
+      addMeshPart(g, new THREE.CylinderGeometry(0.055, 0.065, 0.16, 12), mNozzle, 0.13, -0.27, 0, 0, 0, -0.12);
+      // Straps over the shoulders so it reads as "strapped on" even when idle.
+      const mStrap = new THREE.MeshStandardMaterial({ color: 0x4a4030, roughness: 0.92 });
+      addMeshPart(g, new THREE.BoxGeometry(0.06, 0.34, 0.04), mStrap, -0.12, 0.22, -0.18, 0.5, 0, 0);
+      addMeshPart(g, new THREE.BoxGeometry(0.06, 0.34, 0.04), mStrap, 0.12, 0.22, -0.18, 0.5, 0, 0);
+
+      const mFlame = new THREE.MeshBasicMaterial({ color: 0x66ccff, transparent: true, opacity: 0 });
+      const fL = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.2, 10), mFlame);
+      fL.position.set(-0.13, -0.44, 0);
+      fL.rotation.z = Math.PI;
+      g.add(fL);
+      const fR = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.2, 10), mFlame.clone());
+      fR.position.set(0.13, -0.44, 0);
+      fR.rotation.z = Math.PI;
+      g.add(fR);
+
+      const glow = new THREE.PointLight(0x66ccff, 0, 4);
+      glow.position.set(0, -0.34, 0);
+      g.add(glow);
+
+      g.userData.flames = [fL, fR];
+      g.userData.glow = glow;
+      // Behind the torso, between the shoulder blades. The avatar faces +Z, so back = -Z.
+      g.position.set(0, 1.34, -0.24);
+      return g;
     }
 
     function makeBlindDartModel() {
@@ -11480,7 +11738,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
       if (isAction(e, "dash") && started && !paused && player.health > 0 && gameWorldReady && menuEl.style.display === "none" && !chatOpen && !settingsModalOpen) {
         const nowC = performance.now();
-        if (nowC < state.dashDisabledUntil) {
+        if (isJetStrapping()) {
+          showCombatFeedback(tr("jetBusy", "STRAPPING IN..."), "#88ccff", 0.25);
+        } else if (nowC < state.dashDisabledUntil) {
           showCombatFeedback("DASH LOCKED " + Math.ceil((state.dashDisabledUntil - nowC) / 1000) + "s", "#ff4422", 0.25);
         } else if (nowC >= state.dashCooldownEnd) {
           // True velocity-based dash. DASH_DIST units over DASH_DURATION_MS (≈200ms —
@@ -11492,22 +11752,41 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           const DASH_DIST = 8.0;
           const DASH_DURATION_MS = 200;
           const cp = Math.cos(player.pitch);
-          // Movement-driven direction. If state.lastMove is the zero vector
-          // (initial state, or no WASD for a while), fall back to look-forward.
-          let dirX = state.lastMoveX;
-          let dirZ = state.lastMoveZ;
-          if (dirX === 0 && dirZ === 0) {
+          let dirX;
+          let dirY;
+          let dirZ;
+          const jetting = isJetActive();
+          if (jetting) {
+            // Jet dash: fly along the FULL look vector, pitch included. Camera-forward is
+            // already unit length, so the travelled distance is DASH_DIST at every angle —
+            // straight up covers exactly as much ground as straight ahead.
             dirX = -Math.sin(player.yaw) * cp;
+            dirY = Math.sin(player.pitch);
             dirZ = -Math.cos(player.yaw) * cp;
+          } else {
+            // Ground dash: direction comes from the player's last horizontal movement
+            // (captured every frame in updatePlayer): W → forward, W+A → diagonal
+            // forward-left, etc. No recent WASD falls back to look-forward, flattened.
+            dirX = state.lastMoveX;
+            dirZ = state.lastMoveZ;
+            dirY = 0;
+            if (dirX === 0 && dirZ === 0) {
+              dirX = -Math.sin(player.yaw) * cp;
+              dirZ = -Math.cos(player.yaw) * cp;
+            }
           }
-          state.dashDirX = dirX;
-          state.dashDirZ = dirZ;
-          state.dashDirY = 0; // horizontal dash — no vertical kick
+          // Normalise defensively so DASH_DIST is the true path length in both branches.
+          const dirLen = Math.hypot(dirX, dirY, dirZ) || 1;
+          state.dashDirX = dirX / dirLen;
+          state.dashDirY = dirY / dirLen;
+          state.dashDirZ = dirZ / dirLen;
           state.dashRemainingDist = DASH_DIST;
           state.dashActiveUntil = nowC + DASH_DURATION_MS;
-          playDashSound();
+          state.dashIsJet = jetting;
+          if (jetting) playJetBurstSound();
+          else playDashSound();
           state.dashCooldownEnd = nowC + 350;
-          state.camShake = Math.max(state.camShake, 0.06);
+          state.camShake = Math.max(state.camShake, jetting ? 0.1 : 0.06);
           e.preventDefault();
         }
       }
@@ -11515,6 +11794,10 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       if (isAction(e, "speedNeedle") && started && !paused && gameWorldReady && menuEl.style.display === "none" && !chatOpen && !settingsModalOpen) {
         e.preventDefault();
         activateSpeedNeedle();
+      }
+      if (isAction(e, "jetHarness") && started && !paused && gameWorldReady && menuEl.style.display === "none" && !chatOpen && !settingsModalOpen) {
+        e.preventDefault();
+        if (!e.repeat) activateJetHarness();
       }
       if (isAction(e, "fire")) {
         keys.v = true;
@@ -12352,6 +12635,239 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       }
     }
 
+    // ── Jet harness ───────────────────────────────────────────────────────────
+    /** True while the harness is on and the flight window has not expired. */
+    function isJetActive() {
+      return state.jet.phase === "active";
+    }
+
+    /** True while strapping in — the player is committed and cannot shoot or dash. */
+    function isJetStrapping() {
+      return state.jet.phase === "strapping";
+    }
+
+    function jetPhaseProgress() {
+      const jt = state.jet;
+      const span = jt.endMs - jt.startMs;
+      if (span <= 0) return 1;
+      return THREE.MathUtils.clamp((performance.now() - jt.startMs) / span, 0, 1);
+    }
+
+    function activateJetHarness() {
+      if (!gameWorldReady || !menuEl || menuEl.style.display !== "none") return;
+      if (player.health <= 0 || paused) return;
+      const jt = state.jet;
+      if (jt.phase === "strapping") return;
+      if (jt.phase === "active") {
+        showCombatFeedback(tr("jetAlreadyOn", "HARNESS ALREADY ON"), "#66ccff", 0.4);
+        return;
+      }
+      if (jt.charges <= 0) {
+        showCombatFeedback(tr("jetNoCharge", "NO HARNESS"), "#ff4422", 0.4);
+        return;
+      }
+      jt.charges--;
+      jt.phase = "strapping";
+      jt.startMs = performance.now();
+      jt.endMs = jt.startMs + JET_STRAP_MS;
+      jt.netState = 1;
+      // Strapping in means both hands are busy: drop ADS and stop any burst.
+      state.ads = false;
+      state.mouseDown = false;
+      if (jetRoot) jetRoot.visible = true;
+      playJetStrapSound();
+      showCombatFeedback(tr("jetStrapping", "STRAPPING IN..."), "#88ccff", 0.6);
+    }
+
+    /**
+     * Drives the strap-on animation and the flight window.
+     * Uses performance.now() rather than accumulated dt so the 3 s / 10 s timings hold at
+     * any frame rate (animate() clamps dt to 33 ms, which stretches dt-summed timers).
+     */
+    function updateJetHarness(dt) {
+      const jt = state.jet;
+      const ud = jetRoot ? jetRoot.userData : null;
+
+      if (jt.phase === "strapping") {
+        const p = jetPhaseProgress();
+        if (jetRoot && ud) {
+          jetRoot.visible = true;
+          // 0–0.35 thruster swings in · 0.35–0.78 straps cinch · 0.78–1 hands off, spin-up.
+          const swing = THREE.MathUtils.clamp(p / 0.35, 0, 1);
+          const cinch = THREE.MathUtils.clamp((p - 0.35) / 0.43, 0, 1);
+          const spin = THREE.MathUtils.clamp((p - 0.78) / 0.22, 0, 1);
+          const swingE = swing * swing * (3 - 2 * swing);
+          const home = ud.thrusterHome;
+          ud.thruster.position.set(
+            THREE.MathUtils.lerp(home.x + 0.34, home.x, swingE),
+            THREE.MathUtils.lerp(home.y - 0.26, home.y, swingE),
+            THREE.MathUtils.lerp(home.z + 0.16, home.z, swingE)
+          );
+          ud.thruster.rotation.set(
+            THREE.MathUtils.lerp(0.5, 0, swingE),
+            THREE.MathUtils.lerp(-0.9, 0, swingE),
+            THREE.MathUtils.lerp(0.7, 0, swingE) + Math.sin(spin * Math.PI * 6) * 0.03 * spin
+          );
+          // Straps start slack and wide, then snap flat against the chest.
+          const slackA = 1 - cinch;
+          ud.strapA.rotation.z = 0.34 - 0.2 * cinch;
+          ud.strapA.position.z = -0.38 + 0.05 * slackA;
+          ud.strapA.scale.set(1 + 0.12 * slackA, 1, 1);
+          ud.strapB.rotation.z = -0.28 + 0.16 * cinch;
+          ud.strapB.position.z = -0.38 + 0.05 * slackA;
+          ud.strapB.scale.set(1 + 0.1 * slackA, 1, 1);
+          // Gloves haul the straps in, then drop away.
+          const pullL = Math.sin(THREE.MathUtils.clamp(cinch, 0, 1) * Math.PI);
+          ud.handL.position.set(-0.20 + 0.09 * pullL, -0.24 + 0.05 * pullL, -0.34 - 0.05 * pullL);
+          ud.handR.position.set(0.21 - 0.08 * pullL, -0.20 + 0.04 * pullL, -0.34 - 0.05 * pullL);
+          const handFade = 1 - spin;
+          ud.handL.visible = handFade > 0.05;
+          ud.handR.visible = handFade > 0.05;
+          // Nozzles light as it comes online.
+          for (const f of ud.flames) f.material.opacity = 0.55 * spin;
+        }
+        if (p >= 1) {
+          jt.phase = "active";
+          jt.startMs = performance.now();
+          jt.endMs = jt.startMs + JET_ACTIVE_MS;
+          jt.netState = 2;
+          if (jetRoot) jetRoot.visible = false;
+          playJetIgniteSound();
+          showCombatFeedback(
+            "🜂 " + tr("jetOnline", "JET ONLINE — DASH TO FLY"),
+            "#66ccff",
+            1.6
+          );
+        }
+        return;
+      }
+
+      if (jt.phase === "active") {
+        if (performance.now() >= jt.endMs) {
+          jt.phase = "idle";
+          jt.netState = 0;
+          jt.charges = 1;
+          if (jetRoot) jetRoot.visible = false;
+          showCombatFeedback(tr("jetExpired", "HARNESS BURNED OUT"), "#ff9922", 1.2);
+        }
+        return;
+      }
+
+      // idle
+      jt.netState = 0;
+      if (jetRoot) jetRoot.visible = false;
+    }
+
+    function updateJetHud() {
+      const el = _jetHudEl || (_jetHudEl = document.getElementById("needleHud"));
+      if (!el) return;
+      const jt = state.jet;
+      if (jt.phase === "idle") return; // needle HUD owns the bar when the harness is idle
+      const inGame = gameWorldReady && menuEl && menuEl.style.display === "none";
+      if (!inGame) return;
+      const lbl = _needleLabelEl || (_needleLabelEl = document.getElementById("needleLabel"));
+      const fill = _needleBarFillEl || (_needleBarFillEl = document.getElementById("needleBarFill"));
+      let text = "";
+      let width = "0%";
+      if (jt.phase === "strapping") {
+        const p = jetPhaseProgress();
+        text = tr("jetStrapping", "STRAPPING IN...") + "  " + ((1 - p) * (JET_STRAP_MS / 1000)).toFixed(1) + "s";
+        width = (p * 100).toFixed(0) + "%";
+      } else {
+        const left = Math.max(0, jt.endMs - performance.now());
+        text = "🜂 " + tr("jetActive", "JET") + "  " + (left / 1000).toFixed(1) + "s";
+        width = ((left / JET_ACTIVE_MS) * 100).toFixed(0) + "%";
+      }
+      el.style.display = "flex";
+      el.className = "nh-inject";
+      if (lbl) lbl.textContent = text;
+      if (fill) fill.style.width = width;
+      _needleHudKey = "";  // force the needle HUD to redraw once the harness releases the bar
+    }
+
+    /** Short pneumatic clatter — buckles being drawn tight. */
+    function playJetStrapSound() {
+      if (!audioCtx || !audioSfx) return;
+      const t0 = audioCtx.currentTime;
+      for (let i = 0; i < 3; i++) {
+        const at = t0 + i * 0.9;
+        const src = audioCtx.createBufferSource();
+        src.buffer = getGunNoiseBuffer(0.05);
+        const bp = audioCtx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.setValueAtTime(1800 + i * 350, at);
+        bp.Q.setValueAtTime(3.2, at);
+        const g = audioCtx.createGain();
+        g.gain.setValueAtTime(0.0001, at);
+        g.gain.exponentialRampToValueAtTime(0.32, at + 0.006);
+        g.gain.exponentialRampToValueAtTime(0.0001, at + 0.06);
+        src.connect(bp); bp.connect(g); g.connect(audioSfx);
+        try { src.start(at); src.stop(at + 0.07); } catch (_) {}
+      }
+    }
+
+    /** Turbine spin-up when the harness comes online. */
+    function playJetIgniteSound() {
+      if (!audioCtx || !audioSfx) return;
+      const t0 = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(90, t0);
+      osc.frequency.exponentialRampToValueAtTime(640, t0 + 0.5);
+      const lp = audioCtx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.setValueAtTime(500, t0);
+      lp.frequency.exponentialRampToValueAtTime(2600, t0 + 0.5);
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(0.26, t0 + 0.08);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.62);
+      osc.connect(lp); lp.connect(g); g.connect(audioSfx);
+      try { osc.start(t0); osc.stop(t0 + 0.65); } catch (_) {}
+
+      const src = audioCtx.createBufferSource();
+      src.buffer = getGunNoiseBuffer(0.5);
+      const hp = audioCtx.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.setValueAtTime(1400, t0);
+      const ng = audioCtx.createGain();
+      ng.gain.setValueAtTime(0.0001, t0);
+      ng.gain.linearRampToValueAtTime(0.14, t0 + 0.12);
+      ng.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.55);
+      src.connect(hp); hp.connect(ng); ng.connect(audioSfx);
+      try { src.start(t0); src.stop(t0 + 0.56); } catch (_) {}
+    }
+
+    /** Thrust burst when a jet dash fires. */
+    function playJetBurstSound() {
+      if (!audioCtx || !audioSfx) return;
+      const t0 = audioCtx.currentTime;
+      const src = audioCtx.createBufferSource();
+      src.buffer = getGunNoiseBuffer(0.34);
+      const bp = audioCtx.createBiquadFilter();
+      bp.type = "bandpass";
+      bp.frequency.setValueAtTime(700, t0);
+      bp.frequency.exponentialRampToValueAtTime(2200, t0 + 0.28);
+      bp.Q.setValueAtTime(0.8, t0);
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(0.4, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.34);
+      src.connect(bp); bp.connect(g); g.connect(audioSfx);
+      try { src.start(t0); src.stop(t0 + 0.36); } catch (_) {}
+
+      const sub = audioCtx.createOscillator();
+      sub.type = "sine";
+      sub.frequency.setValueAtTime(150, t0);
+      sub.frequency.exponentialRampToValueAtTime(48, t0 + 0.26);
+      const sg = audioCtx.createGain();
+      sg.gain.setValueAtTime(0.0001, t0);
+      sg.gain.exponentialRampToValueAtTime(0.3, t0 + 0.015);
+      sg.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.3);
+      sub.connect(sg); sg.connect(audioSfx);
+      try { sub.start(t0); sub.stop(t0 + 0.32); } catch (_) {}
+    }
+
     function updateSlowDebuffHud() {
       const slowed = isPlayerSlowed();
       if (SLOW_TEXT_EL) {
@@ -12777,6 +13293,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
     function tryShoot() {
       if (!gameWorldReady || paused || player.health <= 0) return;
       if (state.weaponIndex === 4) return;
+      // Both hands are on the harness straps for the 3 s strap-on — that commitment is the
+      // cost of the item, so no shooting until it is on.
+      if (isJetStrapping()) return;
       const now = performance.now();
       const w = weapon();
       const shootingAds = (state.ads || keys.shift) && !state.reloading && player.health > 0;
@@ -13380,8 +13899,11 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         player.position.z = _resolved.z;
         player.position.y = Math.max(1.65, _resolved.y);
         player.velocityY = 0;
-        player.onGround = true;
         state.dashRemainingDist = Math.max(0, state.dashRemainingDist - _speed * dt);
+        // A jet dash genuinely leaves the floor: keep onGround false above the deck so
+        // gravity takes over the instant the burst ends and the fall is measured. A plain
+        // ground dash still pins you down, exactly as before.
+        player.onGround = state.dashIsJet ? player.position.y <= 1.66 : true;
       }
 
       const healLock = isMedKitHoldHealing();
@@ -13427,6 +13949,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         player.position.y += player.velocityY * dt;
       }
 
+      const _wasAirborne = !player.onGround || _dashing;
       if (player.position.y <= 1.65) {
         player.position.y = 1.65;
         player.velocityY = 0;
@@ -13458,6 +13981,38 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         player.onGround = false;
       }
 
+      // ── Fall damage ───────────────────────────────────────────────────────
+      // Track the high-water mark of the current airborne stretch and, on touchdown,
+      // compare it with the surface actually landed on. Nothing in the base movement set
+      // can reach JET_FATAL_FALL_DROP (a jump peaks ~1.2 units), so in practice this only
+      // ever fires after a jet climb — which is the point: fly too high and the landing
+      // kills you. Routed through damagePlayer so the death screen, sound and shake all run.
+      if (!player.onGround) {
+        // Airborne: keep the high-water mark of this flight.
+        if (player.fallApexY == null || player.position.y > player.fallApexY) {
+          player.fallApexY = player.position.y;
+        }
+        const _drop = player.fallApexY - player.position.y;
+        if (_drop > JET_FALL_WARN_DROP && player.velocityY < -6 && player.health > 0) {
+          showCombatFeedback(tr("jetFallWarn", "⚠ TOO HIGH"), "#ff4422", 0.2);
+        }
+      } else if (!_dashing) {
+        // Touchdown. A ground dash pins onGround true while the player is still in the air,
+        // so the landing is only judged on a frame where no dash is running — otherwise
+        // dashing sideways during a fall would "land" you in mid-air and kill you.
+        if (player.fallApexY != null && player.health > 0) {
+          const drop = player.fallApexY - player.position.y;
+          if (drop >= JET_FATAL_FALL_DROP) {
+            triggerCamShake(0.9);
+            createBlood(player.position.clone());
+            lastPlayerHitWorld.copy(player.position);
+            showCombatFeedback(tr("jetFallDeath", "IMPACT"), "#ff2222", 1.2);
+            damagePlayer(player.maxHealth * 10, null);
+          }
+        }
+        player.fallApexY = null;
+      }
+
       const movingNow = !healLock && (keys.w || keys.a || keys.s || keys.d);
       if (movingNow && player.onGround) {
         state.walkPhase += dt * 10.5;
@@ -13483,6 +14038,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           ads: !!state.ads,
           pitch: player.pitch,
           achievement: equippedAchievementIds[0] || "",
+          // 0 none / 1 strapping in / 2 flying. Mirrors state.jet.phase exactly, so a player
+          // who has not used the harness broadcasts 0 and never shows a pack on anyone's screen.
+          jet: state.jet.netState | 0,
         });
       }
     }
@@ -14176,17 +14734,45 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       bossProjectiles.splice(idx, 1);
     }
 
+    /**
+     * Boss spit-ball flight + hit test.
+     *
+     * Two separate bugs made these balls unable to ever hit the player:
+     *   1. Homing steered at `player.position.y + 0.8` while the hit test measured to
+     *      `player.position` — the EYE, 1.65 above the feet. The ball converged on a point
+     *      0.8 ABOVE the eye, so its closest approach was ~0.8 and the 0.6 radius could
+     *      never trigger. Both now use the same chest point.
+     *   2. A point-vs-point test each frame tunnels: at 22 u/s with dt capped at 0.033 the
+     *      ball moves 0.73 per step — further than the hit radius — so on a slow frame it
+     *      stepped straight through the player. The test is now swept along the segment
+     *      actually travelled this frame.
+     * Damage also went straight to `player.health`, skipping spawn protection, the hit
+     * indicator, the shake, the sound and — worst — `showDeathScreen()`, so a lethal ball
+     * left the player at 0 HP with no death UI. It routes through damagePlayer() now.
+     */
+    const BOSS_BALL_HIT_RADIUS = 0.85;
+    const _bbSeg = new THREE.Vector3();
+    const _bbBody = new THREE.Vector3();
+    const _bbPrev = new THREE.Vector3();
+
+    /** Chest point of the local player — the one reference both homing and hits share. */
+    function playerBodyCenter(out) {
+      return out.set(player.position.x, player.position.y - 0.45, player.position.z);
+    }
+
     function updateBossProjectiles(dt) {
       for (let i = bossProjectiles.length - 1; i >= 0; i--) {
         const bp = bossProjectiles[i];
-        const toPx = player.position.x - bp.mesh.position.x;
-        const toPy = (player.position.y + 0.8) - bp.mesh.position.y;
-        const toPz = player.position.z - bp.mesh.position.z;
+        playerBodyCenter(_bbBody);
+        const toPx = _bbBody.x - bp.mesh.position.x;
+        const toPy = _bbBody.y - bp.mesh.position.y;
+        const toPz = _bbBody.z - bp.mesh.position.z;
         const toLen = Math.sqrt(toPx * toPx + toPy * toPy + toPz * toPz);
         if (toLen > 0.1) {
           const curSpd = bp.velocity.length();
           bp.velocity.set(toPx / toLen * curSpd, toPy / toLen * curSpd, toPz / toLen * curSpd);
         }
+        _bbPrev.copy(bp.mesh.position);
         bp.mesh.position.x += bp.velocity.x * dt;
         bp.mesh.position.y += bp.velocity.y * dt;
         bp.mesh.position.z += bp.velocity.z * dt;
@@ -14195,17 +14781,36 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           destroyBossProjectile(i);
           continue;
         }
-        const pdx = bp.mesh.position.x - player.position.x;
-        const pdy = bp.mesh.position.y - player.position.y;
-        const pdz = bp.mesh.position.z - player.position.z;
-        const pdist = Math.sqrt(pdx * pdx + pdy * pdy + pdz * pdz);
-        if (pdist < 0.6 && player.health > 0) {
-          player.health -= bp.damage;
-          if (player.health < 0) player.health = 0;
-          state.flashTimer = 0.25;
-          player.regenTimer = 0;
-          updateHud();
-          destroyBossProjectile(i);
+        if (player.health > 0) {
+          // Closest approach of the segment travelled this frame to the chest point.
+          playerBodyCenter(_bbBody);
+          _bbSeg.subVectors(bp.mesh.position, _bbPrev);
+          const segLen2 = _bbSeg.lengthSq();
+          let cx = bp.mesh.position.x;
+          let cy = bp.mesh.position.y;
+          let cz = bp.mesh.position.z;
+          if (segLen2 > 1e-8) {
+            const t = THREE.MathUtils.clamp(
+              ((_bbBody.x - _bbPrev.x) * _bbSeg.x +
+                (_bbBody.y - _bbPrev.y) * _bbSeg.y +
+                (_bbBody.z - _bbPrev.z) * _bbSeg.z) / segLen2,
+              0,
+              1
+            );
+            cx = _bbPrev.x + _bbSeg.x * t;
+            cy = _bbPrev.y + _bbSeg.y * t;
+            cz = _bbPrev.z + _bbSeg.z * t;
+          }
+          const pdx = cx - _bbBody.x;
+          const pdy = cy - _bbBody.y;
+          const pdz = cz - _bbBody.z;
+          if (pdx * pdx + pdy * pdy + pdz * pdz < BOSS_BALL_HIT_RADIUS * BOSS_BALL_HIT_RADIUS) {
+            createSparks(bp.mesh.position.clone(), 0xff5522);
+            state.flashTimer = 0.25;
+            damagePlayer(bp.damage, null);
+            destroyBossProjectile(i);
+            continue;
+          }
         }
       }
     }
@@ -15329,19 +15934,23 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
             );
           }
           if (rp.supportSocket) {
-            const wTy = rp.currentWeapon | 0;
-            rp.supportSocket.visible = !rp.isReloading && wTy !== 4;
+            rp.supportSocket.visible = !rp.isReloading;
           }
           if (rp.primarySocket) {
-            const wTyP = rp.currentWeapon | 0;
-            rp.primarySocket.visible = !rp.isReloading && wTyP !== 4;
+            // Med kit used to hide this glove (it had no model to hold); it now carries the
+            // case, so the only reason to hide a hand is a reload.
+            rp.primarySocket.visible = !rp.isReloading;
           }
           if (rp.flashMount) {
             rp.flashMount.visible = !rp.duelBright;
           }
+          updateRemoteJetPack(rp, dt);
           const wTyHold = rp.currentWeapon | 0;
-          const twoHandHold = !rp.isReloading && wTyHold !== 4 && rp.primarySocket && rp.supportSocket;
-          if (twoHandHold) {
+          const heldPose =
+            !rp.isReloading &&
+            rp.primarySocket &&
+            (isRemoteOneHandItem(wTyHold) || rp.supportSocket);
+          if (heldPose) {
             applyRemoteTwoHandStance(rp, dt, moving, wSin, rp.idlePhase, adsBlend);
           } else {
             rp.leftArm.rotation.x = dampScalar(rp.leftArm.rotation.x, targetLX, dt, 11);
@@ -15409,6 +16018,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
       updateInvBar();
       updateSpeedNeedle(dt);
+      updateJetHarness(dt);
+      updateJetHud();
       updateHealthBarHud();
 
       if (isArenaLikeMap(CURRENT_MAP) || isBossArenaMap(CURRENT_MAP)) {
@@ -15661,6 +16272,11 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       weaponRoot.visible = false;
       needleRoot.visible = false;
       state.speedNeedle.phase = 'idle'; state.speedNeedle.timer = 0; state.speedNeedle.charges = 1;
+      jetRoot.visible = false;
+      state.jet.phase = 'idle'; state.jet.startMs = 0; state.jet.endMs = 0;
+      state.jet.charges = 1; state.jet.netState = 0;
+      state.dashIsJet = false;
+      player.fallApexY = null;
       if (_healthBarWrap) _healthBarWrap.style.display = "none";
       if (_castBarWrap)   _castBarWrap.style.display   = "none";
       setLocalPlayerLights(false);
