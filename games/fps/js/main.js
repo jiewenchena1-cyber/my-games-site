@@ -2453,6 +2453,9 @@
 
       const rightArm = new THREE.Group();
       const leftArm = new THREE.Group();
+      // Returns the elbow group so the animator can bend it. It used to be created, frozen
+      // at -0.5 rad and never touched again, which is a big part of why everyone moved like
+      // a mannequin — arms swung from the shoulder as one rigid rod.
       const makePlayerArm = (ag, showHand) => {
         const sh = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.10, 0.18), mCamo2);
         sh.position.set(0, -0.02, 0); ag.add(sh);
@@ -2476,8 +2479,10 @@
           const fng = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.04, 0.08), mGlove);
           fng.position.set(0, -0.40, 0.06); elbow.add(fng);
         }
+        return elbow;
       };
-      makePlayerArm(rightArm, false); makePlayerArm(leftArm, false);
+      const rightElbow = makePlayerArm(rightArm, false);
+      const leftElbow = makePlayerArm(leftArm, false);
       rightArm.position.set(0.30, 1.42, 0.06);
       leftArm.position.set(-0.30, 1.42, 0.06);
       rightArm.rotation.order = "YXZ";
@@ -2486,21 +2491,30 @@
       leftArm.rotation.set(-0.85, 0.55, 0.00);
       group.add(rightArm, leftArm);
 
+      // The leg is now hip → knee → (shin, boot). It used to be one rigid block from hip to
+      // sole, so walking was two straight poles pivoting at the hip. Everything below the
+      // knee keeps its old world offset, just re-parented and re-based on the knee group.
       const makePlayerLeg = (px) => {
         const lg = new THREE.Group();
         const th = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.38, 0.20), mPants);
         th.position.set(0, -0.19, 0); lg.add(th);
+        const knee = new THREE.Group();
+        knee.name = "knee";
+        knee.rotation.order = "YXZ";
+        knee.position.set(0, -0.38, 0);
+        lg.add(knee);
         const kp = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.10, 0.12), mKnee);
-        kp.position.set(0, -0.38, 0.06); lg.add(kp);
+        kp.position.set(0, 0, 0.06); knee.add(kp);
         const sh = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.34, 0.18), mPants);
-        sh.position.set(0, -0.54, 0); lg.add(sh);
+        sh.position.set(0, -0.16, 0); knee.add(sh);
         const bt = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.16, 0.28), mBoot);
-        bt.position.set(0, -0.78, 0.03); lg.add(bt);
+        bt.position.set(0, -0.40, 0.03); knee.add(bt);
         const sl = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.04, 0.30), mBootS);
-        sl.position.set(0, -0.88, 0.04); lg.add(sl);
+        sl.position.set(0, -0.50, 0.04); knee.add(sl);
         const lace = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.10, 0.02), mGear);
-        lace.position.set(0, -0.74, 0.15); lg.add(lace);
+        lace.position.set(0, -0.36, 0.15); knee.add(lace);
         lg.position.set(px, 0.62, 0);
+        lg.userData.knee = knee;
         return lg;
       };
       const legR = makePlayerLeg(0.15);
@@ -2573,9 +2587,16 @@
         equippedAchievement: null,
         rightArm,
         leftArm,
+        rightElbow,
+        leftElbow,
         rightHandGrip,
         rightLeg: legR,
         leftLeg: legL,
+        rightKnee: legR.userData.knee,
+        leftKnee: legL.userData.knee,
+        /** Base Y of the avatar group; the animator adds gait bob on top of this. */
+        bodyBobY: 0,
+        landSquash: 0,
         walkPhase: 0,
         weaponHold,
         gunModel,
@@ -4907,6 +4928,150 @@
       return dummy;
     }
 
+    // ── Training-range animation showcase ─────────────────────────────────────
+    // A scripted mannequin that loops run / jump / shoot / reload / weapon swaps / item use
+    // so the character animation can actually be watched. It is registered as a normal
+    // remote player, so it is driven by exactly the same code that animates opponents —
+    // if it looks right here, it looks right in a match.
+    const SHOWCASE_ID = "__anim_showcase__";
+    const SHOWCASE_HOME = { x: 9, z: 8 };
+    const SHOWCASE_SCRIPT = [
+      { name: "IDLE", dur: 2.2, weapon: 1 },
+      { name: "WALK", dur: 3.4, weapon: 1, move: 2.0, range: 3.2 },
+      { name: "RUN", dur: 3.4, weapon: 1, move: 6.2, range: 5.0 },
+      { name: "JUMP", dur: 2.6, weapon: 1, jump: true },
+      { name: "AIM + FIRE", dur: 3.2, weapon: 1, ads: true, fire: 0.1 },
+      { name: "RELOAD", dur: 2.6, weapon: 1, reload: true },
+      { name: "SHOTGUN", dur: 2.0, weapon: 2, fire: 0.52 },
+      { name: "SMG — RUN + FIRE", dur: 3.0, weapon: 3, move: 6.0, range: 4.5, fire: 0.08 },
+      { name: "AMR", dur: 2.2, weapon: 5, ads: true, fire: 1.26 },
+      { name: "KNIFE", dur: 2.6, weapon: 7, move: 5.0, range: 4.0 },
+      { name: "MED KIT", dur: 2.4, weapon: 4 },
+      { name: "JET HARNESS — STRAP", dur: 3.0, weapon: 1, jet: 1 },
+      { name: "JET HARNESS — FLY", dur: 3.0, weapon: 1, jet: 2, jump: true },
+    ];
+    let showcaseRp = null;
+    let showcaseStep = 0;
+    let showcaseT = 0;
+    let showcaseFireT = 0;
+    let showcaseLabel = null;
+
+    function removeAnimationShowcase() {
+      if (!showcaseRp) return;
+      scene.remove(showcaseRp.group);
+      remotePlayers.delete(SHOWCASE_ID);
+      showcaseRp = null;
+      showcaseLabel = null;
+    }
+
+    function spawnAnimationShowcase() {
+      removeAnimationShowcase();
+      const rp = createRemotePlayer(tr("showcaseName", "ANIMATION DEMO"));
+      rp.x = SHOWCASE_HOME.x;
+      rp.z = SHOWCASE_HOME.z;
+      rp.y = 1.65;
+      rp.yaw = Math.PI; // face the firing line
+      rp.group.position.set(rp.x, 0, rp.z);
+      scene.add(rp.group);
+      remotePlayers.set(SHOWCASE_ID, rp);
+      showcaseRp = rp;
+      showcaseStep = 0;
+      showcaseT = 0;
+      showcaseFireT = 0;
+      // Action caption above the head, on its own sprite so the name tag stays put.
+      const cv = document.createElement("canvas");
+      cv.width = 512; cv.height = 64;
+      const ctx = cv.getContext("2d");
+      const tex = new THREE.CanvasTexture(cv);
+      const spr = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, fog: false })
+      );
+      spr.scale.set(3.4, 0.42, 1);
+      spr.position.set(0, 2.95, 0);
+      spr.renderOrder = 999;
+      spr.raycast = () => {};
+      rp.group.add(spr);
+      showcaseLabel = { ctx, tex, canvas: cv, last: "" };
+    }
+
+    function drawShowcaseLabel(text) {
+      if (!showcaseLabel || showcaseLabel.last === text) return;
+      showcaseLabel.last = text;
+      const { ctx, canvas } = showcaseLabel;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.font = "bold 34px Audiowide, Arial";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.shadowColor = "rgba(0,0,0,0.85)";
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = "#7ec8ff";
+      ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+      showcaseLabel.tex.needsUpdate = true;
+    }
+
+    function updateAnimationShowcase(dt) {
+      if (!showcaseRp || !isTrainingMap(CURRENT_MAP) || !gameWorldReady) return;
+      const rp = showcaseRp;
+      const step = SHOWCASE_SCRIPT[showcaseStep % SHOWCASE_SCRIPT.length];
+      showcaseT += dt;
+      if (showcaseT >= step.dur) {
+        showcaseT = 0;
+        showcaseStep = (showcaseStep + 1) % SHOWCASE_SCRIPT.length;
+        showcaseFireT = 0;
+      }
+      const cur = SHOWCASE_SCRIPT[showcaseStep % SHOWCASE_SCRIPT.length];
+      drawShowcaseLabel(cur.name);
+
+      // Weapon — go through the normal equip path so the held model really changes.
+      const wantW = cur.weapon | 0;
+      if ((rp.currentWeapon | 0) !== wantW) {
+        try { equipRemotePlayerWeapon(rp, wantW); } catch (_) {}
+      }
+      rp.isReloading = !!cur.reload;
+      rp.ads = !!cur.ads;
+      rp.remotePitch = cur.ads ? -0.05 : 0;
+
+      // Movement: strafe along X so the gait is visible side-on from the firing line.
+      if (cur.move) {
+        const span = cur.range || 3;
+        rp.x = SHOWCASE_HOME.x + Math.sin(showcaseT * (cur.move / span)) * span;
+        rp.yaw = Math.cos(showcaseT * (cur.move / span)) > 0 ? Math.PI * 0.5 : -Math.PI * 0.5;
+      } else {
+        rp.x += (SHOWCASE_HOME.x - rp.x) * Math.min(1, dt * 4);
+        rp.yaw = Math.PI;
+      }
+      rp.z = SHOWCASE_HOME.z;
+
+      // Jump arc — a real parabola so the airborne pose and the landing squash both show.
+      if (cur.jump) {
+        const period = 1.3;
+        const t = (showcaseT % period) / period;
+        rp.y = 1.65 + Math.sin(t * Math.PI) * (cur.jet === 2 ? 3.4 : 1.5);
+      } else {
+        rp.y += (1.65 - rp.y) * Math.min(1, dt * 6);
+      }
+
+      // Jet harness state drives the same back-pack visual opponents get.
+      const wantJet = cur.jet | 0;
+      if ((rp.jetState | 0) !== wantJet) {
+        rp.jetState = wantJet;
+        applyRemoteJetPack(rp);
+      }
+
+      // Muzzle flashes + tracers so "firing" reads as firing.
+      if (cur.fire) {
+        showcaseFireT -= dt;
+        if (showcaseFireT <= 0) {
+          showcaseFireT = cur.fire;
+          const w = weapons[wantW] || weapons[1];
+          const from = new THREE.Vector3(rp.visX ?? rp.x, (rp.visY ?? rp.y) - 0.35, rp.visZ ?? rp.z);
+          const to = from.clone().add(new THREE.Vector3(0, 0.1, -18));
+          createBulletTrail(from, to, w.color);
+          createSparks(from.clone(), w.color);
+        }
+      }
+    }
+
     function rebuildTrainingDummies() {
       for (const e of state.enemies) {
         if (e.group) scene.remove(e.group);
@@ -4916,6 +5081,7 @@
       TRAINING_TARGETS.forEach((spec, i) => {
         state.enemies.push(makeTrainingDummy(i, spec));
       });
+      spawnAnimationShowcase();
     }
 
     function updateTrainingDummies(dt) {
@@ -16342,7 +16508,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         flashInnerLocal.penumbra = dampScalar(flashInnerLocal.penumbra, tgt.innerP, dt, lam);
       }
 
-      if (MULTIPLAYER) {
+      // Runs for real opponents AND for the training-range showcase dummy, so what you see
+      // in the range is literally the same animation path an opponent gets.
+      if (MULTIPLAYER || remotePlayers.size > 0) {
         const k = 1 - Math.exp(-17 * dt);
         for (const rp of remotePlayers.values()) {
           if (rp.visX === undefined) {
@@ -16378,6 +16546,31 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           const moving = gSpeed > 0.06;
           const wCos = Math.cos(rp.walkPhase * 2) * 0.055;
           const rpAirborne = rpGroundOffset > 0.12;
+          // ── Gait: knees, body bob, landing squash ──────────────────────────
+          // Speed drives everything so a walk and a sprint don't look identical.
+          const gait = THREE.MathUtils.clamp(gSpeed / 6.5, 0, 1.35);
+          const stride = moving ? gait : 0;
+          if (rp.rightKnee && rp.leftKnee) {
+            // Each knee bends through its own swing half-cycle (heel kicks up behind),
+            // and stays near-straight through the stance half. Standing still keeps a
+            // small bend so the legs aren't locked planks.
+            const idleBend = 0.10;
+            const kneeAmp = 0.30 + 1.05 * stride;
+            const bendR = idleBend + Math.max(0, Math.sin(rp.walkPhase)) * kneeAmp * (moving ? 1 : 0);
+            const bendL = idleBend + Math.max(0, -Math.sin(rp.walkPhase)) * kneeAmp * (moving ? 1 : 0);
+            const airBend = rpAirborne ? 0.55 : 0;
+            rp.rightKnee.rotation.x = dampScalar(rp.rightKnee.rotation.x, bendR + airBend, dt, 15);
+            rp.leftKnee.rotation.x = dampScalar(rp.leftKnee.rotation.x, bendL + airBend, dt, 15);
+          }
+          // Body rises and falls twice per stride, and squashes briefly on touchdown.
+          const wasAir = rp._wasAirborne === true;
+          if (wasAir && !rpAirborne) rp.landSquash = 1;
+          rp._wasAirborne = rpAirborne;
+          rp.landSquash = Math.max(0, (rp.landSquash || 0) - dt * 4.5);
+          const bobTarget = moving && !rpAirborne ? Math.abs(Math.sin(rp.walkPhase)) * 0.055 * stride : 0;
+          rp.bodyBobY = dampScalar(rp.bodyBobY || 0, bobTarget, dt, 13);
+          rp.group.position.y += rp.bodyBobY - rp.landSquash * 0.16;
+
           if (rp.leftLeg && rp.rightLeg) {
             if (rpAirborne) {
               // Airborne: legs tuck up and spread — classic jump pose
@@ -16435,22 +16628,40 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
               rp.gunModel.rotation.x = dampScalar(rp.gunModel.rotation.x, 0, dt, 14);
             }
           }
+          // Torso: counter-twists against the legs, leans into the run, and shoulders roll.
+          const torsoTwist = moving && !rpAirborne ? Math.sin(rp.walkPhase) * 0.20 * stride : 0;
           if (rp.torsoMesh) {
-            rp.torsoMesh.rotation.y = dampScalar(rp.torsoMesh.rotation.y, moving && !rpAirborne ? Math.sin(rp.walkPhase * 0.5) * 0.13 : 0, dt, 10);
+            rp.torsoMesh.rotation.y = dampScalar(rp.torsoMesh.rotation.y, torsoTwist, dt, 10);
             const airTuck = rpAirborne ? Math.min(1, rpGroundOffset / 1.5) * 0.28 : 0;
+            const runLean = stride * 0.16;              // lean forward the faster you go
+            const breath = moving ? 0 : Math.sin(rp.idlePhase * 0.9) * 0.02;
             rp.torsoMesh.rotation.x = dampScalar(
               rp.torsoMesh.rotation.x,
-              pitchBlend * 0.55 + (duelPvp ? Math.sin(rp.walkPhase * 0.35) * 0.02 : 0) - airTuck,
+              pitchBlend * 0.55 + runLean + breath - airTuck + rp.landSquash * 0.22,
               dt,
               11
+            );
+            rp.torsoMesh.rotation.z = dampScalar(
+              rp.torsoMesh.rotation.z || 0,
+              moving && !rpAirborne ? Math.cos(rp.walkPhase) * 0.07 * stride : 0,
+              dt,
+              10
             );
             rp.torsoMesh.position.y = dampScalar(rp.torsoMesh.position.y, 1.24 + (moving && !rpAirborne ? Math.abs(wCos) * 0.08 : 0), dt, 10);
           }
           if (rp.headGroup) {
-            rp.headGroup.rotation.y = dampScalar(rp.headGroup.rotation.y, moving ? -Math.sin(rp.walkPhase * 0.5) * 0.08 : 0, dt, 10);
+            // Head counter-rotates against the torso twist so the gaze stays level instead
+            // of swinging with the shoulders — the single cheapest "alive" cue there is.
+            rp.headGroup.rotation.y = dampScalar(rp.headGroup.rotation.y, -torsoTwist * 0.75, dt, 12);
             rp.headGroup.rotation.x = dampScalar(
               rp.headGroup.rotation.x,
-              (moving ? Math.cos(rp.walkPhase) * 0.06 : 0) + pitchBlend * 0.78,
+              (moving ? Math.cos(rp.walkPhase) * 0.05 * stride : 0) + pitchBlend * 0.78 - stride * 0.10,
+              dt,
+              10
+            );
+            rp.headGroup.rotation.z = dampScalar(
+              rp.headGroup.rotation.z || 0,
+              moving && !rpAirborne ? -Math.cos(rp.walkPhase) * 0.05 * stride : 0,
               dt,
               10
             );
@@ -16472,6 +16683,35 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
             !rp.isReloading &&
             rp.primarySocket &&
             (isRemoteOneHandItem(wTyHold) || rp.supportSocket);
+
+          // ── Elbows ─────────────────────────────────────────────────────────
+          // These were built and then frozen at -0.5 forever. Bending them is what turns
+          // the arms from rods into limbs.
+          if (rp.rightElbow && rp.leftElbow) {
+            let elbR;
+            let elbL;
+            if (rp.isReloading) {
+              // Big working bend — the hands are busy at the magazine well.
+              const rs = Math.sin(rp.reloadPhase);
+              elbR = -1.25 - rs * 0.35;
+              elbL = -1.05 + Math.cos(rp.reloadPhase * 1.2) * 0.30;
+            } else if (heldPose) {
+              // Holding a weapon: elbows stay tucked, breathing slightly, tighter on ADS.
+              const tuck = -0.62 - adsBlend * 0.28;
+              const jog = moving ? Math.sin(rp.walkPhase) * 0.09 * stride : 0;
+              elbR = tuck + jog;
+              elbL = tuck - jog;
+            } else {
+              // Free arms (knife / med kit / empty): elbows swing opposite the legs.
+              const swing = moving ? Math.sin(rp.walkPhase) * 0.42 * stride : 0;
+              const idle = Math.sin(rp.idlePhase * 1.1) * 0.05;
+              elbR = -0.42 - Math.max(0, swing) - idle;
+              elbL = -0.42 - Math.max(0, -swing) + idle;
+            }
+            rp.rightElbow.rotation.x = dampScalar(rp.rightElbow.rotation.x, elbR, dt, 12);
+            rp.leftElbow.rotation.x = dampScalar(rp.leftElbow.rotation.x, elbL, dt, 12);
+          }
+
           if (heldPose) {
             applyRemoteTwoHandStance(rp, dt, moving, wSin, rp.idlePhase, adsBlend);
           } else {
@@ -16479,6 +16719,11 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
             rp.rightArm.rotation.x = dampScalar(rp.rightArm.rotation.x, targetRX, dt, 11);
             rp.leftArm.rotation.y = dampScalar(rp.leftArm.rotation.y, targetLY, dt, 10);
             rp.rightArm.rotation.y = dampScalar(rp.rightArm.rotation.y, targetRY, dt, 10);
+            // Real shoulder swing, opposite the legs, scaled by speed. Previously the arms
+            // were damped to a fixed stance angle and barely moved while running.
+            const armSwing = moving ? -Math.sin(rp.walkPhase) * 0.55 * stride : 0;
+            targetRX += armSwing;
+            targetLX -= armSwing;
             const lut =
               REMOTE_WALK_PHASE_LUT[
                 Math.abs(((rp.walkPhase * 15.25) | 0) % REMOTE_WALK_PHASE_LUT.length)
@@ -16536,6 +16781,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
       if (isTrainingMap(CURRENT_MAP) && gameWorldReady) {
         updateTrainingDummies(dt);
+        updateAnimationShowcase(dt);
       }
 
       updateInvBar();
@@ -16845,6 +17091,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       pauseMenuBgm();
 
       bossDeathPickupPos = null;
+      if (!isTrainingMap(mapName)) removeAnimationShowcase();
       clearHellLootRing();
       sessionKillCount = 0;
       sessionBossKillCount = 0;
@@ -17029,6 +17276,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       state.enemies.length = 0;
       for (const bp of bossProjectiles) { scene.remove(bp.mesh); }
       bossProjectiles.length = 0;
+      removeAnimationShowcase();
       for (const [id, rp] of remotePlayers) {
         scene.remove(rp.group);
       }
