@@ -2749,9 +2749,10 @@
     }
 
     function getMapEnvColors() {
-      // Training gets its own warm daylight sky — the shared cool-grey bright-map palette
-      // made the range look overcast and lifeless.
-      if (isTrainingMap(CURRENT_MAP)) return { fog: 0xcfe2f2, bg: 0xdcecfb };
+      // Training keeps the stock concrete palette but gets an actual blue sky overhead.
+      // The fog stays close to the shared bright-map grey so distance doesn't tint blue —
+      // only the sky itself is coloured.
+      if (isTrainingMap(CURRENT_MAP)) return { fog: 0x9db4cc, bg: 0x6fa8dc };
       if (isBrightIndoorMap(CURRENT_MAP)) return { fog: 0x8ea6c6, bg: 0xa9c3e6 };
       if (isBossArenaMap(CURRENT_MAP)) return { fog: 0x1a1a22, bg: 0x1a1a22 };
       return { fog: 0x070504, bg: 0x070504 };
@@ -3625,30 +3626,13 @@
       }
     }
 
-    /** Warm sand the training range's concrete is tinted toward, floor included. */
-    const TRAINING_WARM_TINT = 0xffe9c8;
-    const TRAINING_FLOOR_TINT = 0xb9a887;
-
     function resolveWallTint(color) {
-      const training = isTrainingMap(CURRENT_MAP);
       const defaultTint = isBrightIndoorMap(CURRENT_MAP) ? 0x8a96a8 : 0x6b7384;
       const base = color != null ? color : defaultTint;
       if (!isBrightIndoorMap(CURRENT_MAP)) return base;
       const c = new THREE.Color(base);
-      // The shared bright-map lift (0.2 toward white) still left the range looking like an
-      // overcast car park. Training pulls much harder, and toward warm sunlight rather than
-      // white, so the concrete reads as sunlit instead of grey.
-      if (training) c.lerp(new THREE.Color(TRAINING_WARM_TINT), 0.55);
-      else c.lerp(new THREE.Color(0xffffff), 0.2);
+      c.lerp(new THREE.Color(0xffffff), 0.2);
       return c.getHex();
-    }
-
-    /** The one shared ground plane is re-tinted per map; training gets warm sand. */
-    function setFloorTint(tint) {
-      const rep = worldSize / FLOOR_CEILING_METERS_PER_REPEAT;
-      floor.material = getWallMaterialCached(rep, rep, tint);
-      const entry = _texturedMeshes.find((e) => e.mesh === floor);
-      if (entry) entry.tint = tint;
     }
 
     function addWallBox(w, h, d, x, y, z, color = 0x6b7384) {
@@ -4521,7 +4505,6 @@
     function clearMap() {
       clearAllMazeChunks();
       clearPvpMapLights();
-      setFloorTint(0x666670); // undo any per-map floor tint (training warms it up)
       while (wallMeshes.length) {
         const mesh = wallMeshes.pop();
         scene.remove(mesh);
@@ -5023,31 +5006,30 @@
         [-20, -34], [0, -34], [20, -34],
         [0, -40], [-9, -44], [9, -44], [-24, -42], [24, -42],
       ];
-      // v7: the range was lit like a basement. Everything below is warmer and roughly
-      // twice as strong, and the ceiling stays open so it reads as an outdoor range in
-      // daylight rather than a grey box.
+      // v8: stock colours, only ~15 % brighter than the original. (v7 doubled the light and
+      // tinted everything warm, which turned the concrete brown — reverted.) The only real
+      // change to the look is the blue sky from getMapEnvColors().
       for (const [lx, lz] of lightPos) {
-        const L = createPhysicalPointLight(0xfff1dc, 620, 165, 2.0);
-        L.position.set(lx, H + 1.4, lz);
+        const L = createPhysicalPointLight(0xfff6ee, 550, 145, 2.2);
+        L.position.set(lx, H + 1.1, lz);
         L.castShadow = false;
         scene.add(L);
         pvpMapLights.push(L);
       }
-      const ambFill = new THREE.AmbientLight(0xffeedd, 3.4);
+      const ambFill = new THREE.AmbientLight(0xd4e2f5, 2.4);
       scene.add(ambFill);
       pvpMapLights.push(ambFill);
-      // Warm sun above, sandy bounce from below — the old ground colour was near-black.
-      const hemiFill = new THREE.HemisphereLight(0xfff4e2, 0xb0a184, 6.4);
+      const hemiFill = new THREE.HemisphereLight(0xeef6ff, 0x5c5348, 4.8);
       scene.add(hemiFill);
       pvpMapLights.push(hemiFill);
-      const sunFill = new THREE.DirectionalLight(0xfff2d2, 16.0);
-      sunFill.position.set(26, 48, 20);
+      const sunFill = new THREE.DirectionalLight(0xfff6ea, 11.0);
+      sunFill.position.set(18, 42, 14);
       sunFill.castShadow = false;
       scene.add(sunFill);
       pvpMapLights.push(sunFill);
-      // Low warm back-fill so the far end of the extended range isn't a dark hole.
-      setFloorTint(TRAINING_FLOOR_TINT);
-      const backFill = new THREE.DirectionalLight(0xffe6c0, 5.0);
+      // The range is now 96 units deep, so the far end needs its own fill or it goes black.
+      // Neutral white and deliberately weak — this is a fill, not a second sun.
+      const backFill = new THREE.DirectionalLight(0xf2f6ff, 3.0);
       backFill.position.set(-14, 16, -46);
       backFill.castShadow = false;
       scene.add(backFill);
