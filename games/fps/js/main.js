@@ -755,13 +755,37 @@
     }
     let TRAINING_COOP = false;
     const TRAINING_POINTS = { head: 100, body: 50, leg: 25 };
-    const TRAINING_LANES = [
-      { xMin: -15, xMax: -11, z: -14, speed: 2.0 },
-      { xMin: -4, xMax: 0, z: -14, speed: 2.35 },
-      { xMin: 7, xMax: 11, z: -14, speed: 1.85 },
-      { xMin: -11, xMax: -7, z: -18, speed: 2.15 },
-      { xMin: 3, xMax: 7, z: -18, speed: 2.5 },
+    /**
+     * Training-range roster. `kind` picks both the model and the HP:
+     *   recruit                     → player avatar at 100 HP (identical to a real player)
+     *   normal / fast / gunner / tank → the real zombie models at their real HP
+     *                                   (100 / 70 / 75 / 180), so the time-to-kill you
+     *                                   practise here is the same one you get in the arena
+     *   boss                        → the Hormone Zombie at its real 15 000 HP, for
+     *                                   sustained-damage / mag-dump tests
+     * A `lane` makes the target patrol between xMin..xMax; without one it stands still.
+     * The player spawns at (0, 22) facing -Z, so everything is laid out down-range.
+     */
+    const TRAINING_TARGETS = [
+      // ── Near line: moving man-sized targets (the original five lanes) ──
+      { kind: "recruit", lane: { xMin: -15, xMax: -11, z: -14, speed: 2.0 } },
+      { kind: "recruit", lane: { xMin: -4, xMax: 0, z: -14, speed: 2.35 } },
+      { kind: "recruit", lane: { xMin: 7, xMax: 11, z: -14, speed: 1.85 } },
+      { kind: "recruit", lane: { xMin: -11, xMax: -7, z: -18, speed: 2.15 } },
+      { kind: "recruit", lane: { xMin: 3, xMax: 7, z: -18, speed: 2.5 } },
+      // ── Mid line: one static zombie of every type, left→right, weakest→toughest ──
+      { kind: "normal", x: -19, z: -27 },
+      { kind: "fast", x: -6.5, z: -27 },
+      { kind: "gunner", x: 6.5, z: -27 },
+      { kind: "tank", x: 19, z: -27 },
+      // ── Far line: moving zombies — a sprinter and a shambler ──
+      { kind: "fast", lane: { xMin: -26, xMax: -14, z: -33, speed: 5.4 } },
+      { kind: "normal", lane: { xMin: 14, xMax: 26, z: -33, speed: 2.2 } },
+      // ── Back of the range: the boss ──
+      { kind: "boss", x: 0, z: -39 },
     ];
+    /** Seconds a downed target stays dissolved before standing back up at full HP. */
+    const TRAINING_RESPAWN_SEC = 3.0;
     function freshTrainingStats() {
       return { points: 0, hits: 0, head: 0, body: 0, leg: 0, shots: 0 };
     }
@@ -4746,26 +4770,79 @@
       updateTrainingScoreboardUI();
     }
 
-    function makeTrainingDummy(idx, lane) {
-      const label = `${tr("trainingDummyName", "Target")} ${idx + 1}`;
-      const avatar = createRemotePlayer(label);
-      avatar.group.rotation.y = 0;
-      avatar.group.position.set((lane.xMin + lane.xMax) * 0.5, 0, lane.z);
-      if (avatar.nameSprite) avatar.nameSprite.visible = false;
-      avatar.group.visible = true;
-      scene.add(avatar.group);
-      return {
-        trainingDummy: true,
-        alive: true,
-        hp: 9999,
-        maxHp: 9999,
-        group: avatar.group,
-        lane,
-        patrolDir: 1,
-        patrolSpeed: lane.speed,
-        walkPhase: Math.random() * Math.PI * 2,
-        dissolveTimer: 0,
-      };
+    /**
+     * Canvas HP bar identical to the one the zombie factories build, for models that don't
+     * come with one (the player avatar). drawEnemyHp() then works on the dummy unchanged.
+     */
+    function attachHpBar(root, y, scaleX) {
+      const hpCanvas = document.createElement("canvas");
+      hpCanvas.width = 128;
+      hpCanvas.height = 24;
+      const hpCtx = hpCanvas.getContext("2d");
+      const hpTexture = new THREE.CanvasTexture(hpCanvas);
+      const hpSprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: hpTexture, transparent: true, depthTest: true, depthWrite: false })
+      );
+      hpSprite.scale.set(scaleX, scaleX * 0.19, 1);
+      hpSprite.position.set(0, y, 0);
+      hpSprite.raycast = () => {};
+      root.add(hpSprite);
+      return { hpCanvas, hpCtx, hpTexture, hpSprite };
+    }
+
+    /**
+     * Build one training target. Targets used to be invincible 9999-HP player avatars that
+     * dissolved on any single hit; they now carry the real HP of whatever they represent and
+     * only go down when it reaches zero, with a live HP bar over the head.
+     */
+    function makeTrainingDummy(idx, spec) {
+      const lane = spec.lane || null;
+      const homeX = lane ? (lane.xMin + lane.xMax) * 0.5 : spec.x;
+      const homeZ = lane ? lane.z : spec.z;
+      let dummy;
+
+      if (spec.kind === "boss") {
+        dummy = makeHormoneZombie(homeX, homeZ, false);
+      } else if (spec.kind === "recruit") {
+        const label = `${tr("trainingDummyName", "Target")} ${idx + 1}`;
+        const avatar = createRemotePlayer(label);
+        if (avatar.nameSprite) avatar.nameSprite.visible = false;
+        avatar.group.position.set(homeX, 0, homeZ);
+        scene.add(avatar.group);
+        const bar = attachHpBar(avatar.group, 2.35, 1.7);
+        dummy = {
+          type: "recruit",
+          group: avatar.group,
+          hp: player.maxHealth,      // same 100 HP a real player has
+          maxHp: player.maxHealth,
+          ...bar,
+        };
+      } else {
+        dummy = makeZombie(homeX, homeZ, spec.kind);
+      }
+
+      // Strip the AI state so a target never chases or shoots — updateTrainingDummies owns it.
+      dummy.trainingDummy = true;
+      dummy.alive = true;
+      dummy.aware = false;
+      dummy.moving = false;
+      dummy.ranged = false;
+      dummy.attackCooldownTimer = Infinity;
+      dummy.targetKind = spec.kind;
+      dummy.homeX = homeX;
+      dummy.homeZ = homeZ;
+      dummy.baseY = dummy.group.position.y;
+      dummy.lane = lane;
+      dummy.patrolDir = 1;
+      dummy.patrolSpeed = lane ? lane.speed : 0;
+      dummy.walkPhase = Math.random() * Math.PI * 2;
+      dummy.dissolveTimer = 0;
+      dummy.respawnTimer = 0;
+      dummy._hpBarRatio = -1;
+      dummy.group.rotation.y = 0;
+      dummy.group.visible = true;
+      drawEnemyHp(dummy);
+      return dummy;
     }
 
     function rebuildTrainingDummies() {
@@ -4774,19 +4851,45 @@
       }
       state.enemies.length = 0;
       resetTrainingSession();
-      TRAINING_LANES.forEach((lane, i) => {
-        state.enemies.push(makeTrainingDummy(i, lane));
+      TRAINING_TARGETS.forEach((spec, i) => {
+        state.enemies.push(makeTrainingDummy(i, spec));
       });
     }
 
     function updateTrainingDummies(dt) {
       if (!isTrainingMap(CURRENT_MAP) || !gameWorldReady) return;
       for (const enemy of state.enemies) {
-        if (!enemy.trainingDummy || !enemy.alive) continue;
+        if (!enemy.trainingDummy) continue;
+
+        // Downed: run out the dissolve, then stand back up at full HP on the home spot.
+        if (!enemy.alive) {
+          if (enemy.dissolveTimer > 0) enemy.dissolveTimer = Math.max(0, enemy.dissolveTimer - dt);
+          enemy.respawnTimer -= dt;
+          if (enemy.respawnTimer <= 0) {
+            enemy.alive = true;
+            enemy.hp = enemy.maxHp;
+            enemy._hpBarRatio = -1;
+            enemy.dissolveTimer = 0;
+            enemy.group.position.set(enemy.homeX, enemy.baseY, enemy.homeZ);
+            enemy.group.visible = true;
+            drawEnemyHp(enemy);
+          }
+          continue;
+        }
+
         if (enemy.dissolveTimer > 0) {
           enemy.dissolveTimer = Math.max(0, enemy.dissolveTimer - dt);
           continue;
         }
+
+        if (!enemy.lane) {
+          // Static target: just a slow idle sway so it doesn't look frozen.
+          enemy.walkPhase += dt * 1.1;
+          enemy.group.position.y = enemy.baseY + Math.sin(enemy.walkPhase) * 0.02;
+          enemy.group.rotation.y = 0;
+          continue;
+        }
+
         const lane = enemy.lane;
         let x = enemy.group.position.x + enemy.patrolDir * enemy.patrolSpeed * dt;
         if (x >= lane.xMax) {
@@ -4798,7 +4901,7 @@
         }
         enemy.group.position.x = x;
         enemy.walkPhase += dt * (2.4 + enemy.patrolSpeed * 0.35);
-        enemy.group.position.y = Math.sin(enemy.walkPhase) * 0.04;
+        enemy.group.position.y = enemy.baseY + Math.sin(enemy.walkPhase) * 0.04;
         enemy.group.rotation.y = 0;
       }
     }
@@ -4808,17 +4911,38 @@
       const H = 4.5;
       const thick = 1.0;
       const trim = 0x929bab;
-      const half = 28;
-      addWallBox(half * 2, H, thick, 0, H / 2, -half);
-      addWallBox(half * 2, H, thick, 0, H / 2, half);
-      addWallBox(thick, H, half * 2, -half, H / 2, 0);
-      addWallBox(thick, H, half * 2, half, H / 2, 0);
+      // v5: the range grew from 56×56 to 96×96 so the mid zombie line, the far moving line
+      // and the boss bay at the back all fit down-range of the original lanes. The player
+      // still spawns at (0, 22) facing -Z, so the firing line is unchanged — everything new
+      // is added beyond the old back wall.
+      const halfX = 34;
+      const zBack = -48;
+      const zFront = 26;
+      addWallBox(halfX * 2, H, thick, 0, H / 2, zBack);
+      addWallBox(halfX * 2, H, thick, 0, H / 2, zFront);
+      addWallBox(thick, H, zFront - zBack, -halfX, H / 2, (zFront + zBack) / 2);
+      addWallBox(thick, H, zFront - zBack, halfX, H / 2, (zFront + zBack) / 2);
+      // Waist-high cover on the near lanes (unchanged) …
       addWallBox(8, 2.2, thick, -12, 1.1, -10, trim);
       addWallBox(8, 2.2, thick, 12, 1.1, -10, trim);
       addWallBox(8, 2.2, thick, -4, 1.1, -20, trim);
       addWallBox(8, 2.2, thick, 8, 1.1, -20, trim);
+      // … plus barricades framing the new mid and far lines.
+      addWallBox(6, 1.5, thick, -26, 0.75, -23, trim);
+      addWallBox(6, 1.5, thick, 26, 0.75, -23, trim);
+      addWallBox(5, 1.8, thick, 0, 0.9, -31, trim);
+      addWallBox(thick, 2.4, 7, -30, 1.2, -36, trim);
+      addWallBox(thick, 2.4, 7, 30, 1.2, -36, trim);
+      // Boss bay at the very back: two side buttresses so it reads as its own alcove.
+      addWallBox(thick, 3.2, 9, -11, 1.6, -41, trim);
+      addWallBox(thick, 3.2, 9, 11, 1.6, -41, trim);
+      // Lighting rig scaled up with the room — the far half was pitch black on the first pass.
       const lightPos = [
         [-14, -12], [0, -12], [14, -12], [-8, -18], [8, -18], [0, -8],
+        [-24, -6], [24, -6], [0, 4], [-22, 14], [22, 14],
+        [-19, -27], [0, -27], [19, -27], [-28, -30], [28, -30],
+        [-20, -34], [0, -34], [20, -34],
+        [0, -40], [-9, -44], [9, -44], [-24, -42], [24, -42],
       ];
       for (const [lx, lz] of lightPos) {
         const L = createPhysicalPointLight(0xfff6ee, 480, 140, 2.2);
@@ -9673,19 +9797,28 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       });
     }
 
-    function playTrainingDummyHitDissolve(enemy, hitWorld) {
-      if (!enemy || !enemy.group || enemy.dissolveTimer > 0) return;
+    /**
+     * Apply weapon damage to a training target and drop it only when its HP is gone.
+     * Targets used to dissolve on any single hit regardless of weapon, which made the range
+     * useless for learning time-to-kill; they now take the same damage numbers as the real
+     * thing. Returns true if this hit finished it off.
+     */
+    function damageTrainingDummy(enemy, zone, w, hitWorld) {
+      if (!enemy || !enemy.group || !enemy.alive || enemy.dissolveTimer > 0) return false;
+      applyDamage(enemy, zone, w);
+      drawEnemyHp(enemy);
+      if (enemy.hp > 0) return false;
+
+      enemy.alive = false;
+      enemy.hp = 0;
       enemy.dissolveTimer = DISSOLVE_DURATION + 0.12;
+      enemy.respawnTimer = TRAINING_RESPAWN_SEC;
       enemy.group.visible = false;
       totalTrainingDummyKills++;
       checkAchievements();
       persistUnlocks();
-      spawnHumanoidDissolve(enemy.group, hitWorld, {
-        onComplete: () => {
-          if (enemy.group) enemy.group.visible = true;
-          enemy.dissolveTimer = 0;
-        },
-      });
+      spawnHumanoidDissolve(enemy.group, hitWorld);
+      return true;
     }
 
     function showCombatFeedback(text, color, dur = 0.18) {
@@ -12034,8 +12167,11 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         floor.visible = false;
         ceiling.visible = false;
       } else if (isTrainingMap(CURRENT_MAP)) {
+        // yaw 0 looks down -Z, which is where the whole range lives. This used to be
+        // Math.PI, i.e. facing the wall behind the firing line with every target at your
+        // back — you had to spin 180° on every spawn.
         player.position.set(0, 1.65, 22);
-        player.yaw = Math.PI;
+        player.yaw = 0;
         floor.visible = true;
         ceiling.visible = false;
       } else {
@@ -12238,9 +12374,10 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       for (const enemy of state.enemies) {
         if (!enemyBlockingHits(enemy)) continue;
         enemy.group.updateMatrixWorld(true);
-        const hit = enemy.trainingDummy
-          ? humanoidHitAlongRay(ray, enemy.group)
-          : enemyHitAlongRay(ray, enemy);
+        // enemyHitAlongRay already forwards isBoss, so it covers training targets too —
+        // the old dummy-only branch always used the man-sized hitbox, which would miss most
+        // of the (much larger) boss target now standing at the back of the range.
+        const hit = enemyHitAlongRay(ray, enemy);
         if (hit && hit.t < wallDist) {
           pierceHits.push({ enemy, t: hit.t, zone: hit.zone });
         }
@@ -13333,7 +13470,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         playKnifeHitSound();
         if (bestEnemy.trainingDummy) {
           registerTrainingHit(bestEnemyZone);
-          playTrainingDummyHitDissolve(bestEnemy, bp);
+          const downed = damageTrainingDummy(bestEnemy, bestEnemyZone, w, bp);
+          triggerHitFeedback(downed, bestEnemyZone === "head");
           updateHud();
           return;
         }
@@ -13608,7 +13746,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
           if (bestEnemy.trainingDummy) {
             registerTrainingHit(bestEnemyZone);
-            playTrainingDummyHitDissolve(bestEnemy, bp);
+            const downed = damageTrainingDummy(bestEnemy, bestEnemyZone, w, bp);
+            if (downed) triggerHitFeedback(true, bestEnemyZone === "head");
             updateHud();
             continue;
           }
@@ -16458,11 +16597,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
       player.velocityY = 0;
       player.onGround = true;
-      if (isTrainingMap(CURRENT_MAP)) {
-        player.yaw = Math.PI;
-      } else {
-        player.yaw = 0;
-      }
+      // Every map spawns looking down -Z; the training range used to spawn facing the wall.
+      player.yaw = 0;
       player.pitch = 0;
       camera.position.copy(player.position);
 
