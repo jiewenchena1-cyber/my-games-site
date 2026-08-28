@@ -6438,6 +6438,67 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       }
     }
 
+    /**
+     * Footprint test shared by the stand-on-top collision exemption AND the landing check.
+     *
+     * These two used to disagree: the exemption allowed the centre to be 0.17 OUTSIDE the
+     * box, while landing required it 0.05 INSIDE. That left a 0.22-wide ring around every
+     * ledge where the player was no longer held up but was still inside the box footprint —
+     * so they dropped, lost the exemption the moment their feet went below the top face, and
+     * the 0.34 collision sphere was then sitting inside solid geometry with every direction
+     * blocked. That is the "walk to the edge of a wall you flew onto and get stuck inside it"
+     * bug. Both callers now use this one region, so anywhere you are exempt you are also
+     * supported and the dead zone cannot exist.
+     */
+    function centreOverBoxTop(box, cx, cz) {
+      const m = player.radius * 0.5; // 0.17
+      return (
+        cx > box.min.x - m && cx < box.max.x + m &&
+        cz > box.min.z - m && cz < box.max.z + m
+      );
+    }
+
+    const _unstickProbe = new THREE.Vector3();
+
+    /**
+     * Safety net: if the player is already inside solid geometry, walk them out.
+     * Tries rings of increasing radius at the current height, then — if they are genuinely
+     * buried — lifts them onto the top of the box they are stuck in. Without this the only
+     * escape was to use the jet harness again.
+     */
+    function unstickFromWalls() {
+      if (!collidesWithWalls(player.position)) return false;
+      for (let dist = 0.12; dist <= 3.0; dist += 0.12) {
+        for (let i = 0; i < 16; i++) {
+          const a = (i / 16) * Math.PI * 2;
+          _unstickProbe.set(
+            player.position.x + Math.cos(a) * dist,
+            player.position.y,
+            player.position.z + Math.sin(a) * dist
+          );
+          if (!collidesWithWalls(_unstickProbe)) {
+            player.position.x = _unstickProbe.x;
+            player.position.z = _unstickProbe.z;
+            return true;
+          }
+        }
+      }
+      // Fully enclosed at this height — stand on whatever we are inside of.
+      let topY = null;
+      forEachNearbyWallBox(player.position.x, player.position.z, (box) => {
+        if (!centreOverBoxTop(box, player.position.x, player.position.z)) return;
+        if (topY === null || box.max.y > topY) topY = box.max.y;
+      });
+      if (topY !== null) {
+        player.position.y = topY + 1.65;
+        player.velocityY = 0;
+        player.onGround = true;
+        player.fallApexY = null; // don't bill the player for a fall they never took
+        return true;
+      }
+      return false;
+    }
+
     function collidesWithWalls(pos) {
       _playerWallSphere.radius = player.radius;
       const pBottom = player.position.y - 1.65;
@@ -6452,11 +6513,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         // horizontal collision — they're on top and must be free to walk.
         // If they're beside the box at the same height, fall through to sphere test.
         if (pBottom >= box.max.y - 0.02) {
-          const cx = player.position.x;
-          const cz = player.position.z;
-          const hr = player.radius * 0.5; // 0.17 — half-radius tolerance
-          if (cx > box.min.x - hr && cx < box.max.x + hr &&
-              cz > box.min.z - hr && cz < box.max.z + hr) return;
+          if (centreOverBoxTop(box, player.position.x, player.position.z)) return;
         }
         _playerWallSphere.center.set(pos.x, (box.min.y + box.max.y) * 0.5, pos.z);
         if (box.intersectsSphere(_playerWallSphere)) hit = true;
@@ -14426,9 +14483,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           const topY = box.max.y;
           // Feet must be within a thin slab just above the box top
           if (feetY >= topY - 0.42 && feetY <= topY + 0.08) {
-            // Horizontal: player centre must be inside box footprint (shrunk by radius)
-            if (px > box.min.x + 0.05 && px < box.max.x - 0.05 &&
-                pz > box.min.z + 0.05 && pz < box.max.z - 0.05) {
+            // Same footprint the collision exemption uses — see centreOverBoxTop().
+            if (centreOverBoxTop(box, px, pz)) {
               player.position.y = topY + 1.65;
               player.velocityY = 0;
               player.onGround = true;
@@ -14440,6 +14496,10 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       } else {
         player.onGround = false;
       }
+
+      // Last line of defence — nothing above should be able to bury the player now, but if
+      // anything ever does, walk them back out instead of leaving them trapped.
+      unstickFromWalls();
 
       // ── Fall damage ───────────────────────────────────────────────────────
       // Track the high-water mark of the current airborne stretch and, on touchdown,
