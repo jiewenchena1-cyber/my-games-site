@@ -196,24 +196,69 @@
       return rows;
     })();
 
-    const LOOK_SENS_BASE_YAW = 0.004;
-    const LOOK_SENS_BASE_PITCH = 0.0032;
-    const LOOK_SENS_PERCENT_MIN = 0.1;
-    const LOOK_SENS_PERCENT_MAX = 200;
-    const LOOK_SENS_PERCENT_DEFAULT = 100;
+    // ── Mouse sensitivity: the standard FPS model ─────────────────────────────
+    // Aim used to be an opaque "percent of an internal constant", so the number meant
+    // nothing outside this game. It now works exactly like Source / CS / Valorant:
+    //
+    //     degrees per mouse count = sensitivity × m_yaw     (m_yaw = 0.022)
+    //     eDPI                    = mouse DPI × sensitivity
+    //     cm per 360°             = 360 / (eDPI × m_yaw) × 2.54
+    //
+    // DPI 800 at sensitivity 1.64 is therefore eDPI 1312 and ~31.2 cm/360 — the same
+    // numbers any other shooter would give, so a sens can be copied straight across.
+    // Pitch uses the same rate as yaw (m_pitch = m_yaw, the 1:1 convention); the old code
+    // used a 0.8 ratio that quietly made vertical aim slower than horizontal.
+    const MOUSE_YAW_DEG_PER_COUNT = 0.022;
+    const SENS_MIN = 0.05;
+    const SENS_MAX = 20;
+    const SENS_DEFAULT = 1.64;
+    const ADS_SENS_MUL_MIN = 0.1;
+    const ADS_SENS_MUL_MAX = 2.5;
+    const ADS_SENS_MUL_DEFAULT = 1.0;
+    const MOUSE_DPI_MIN = 100;
+    const MOUSE_DPI_MAX = 32000;
+    const MOUSE_DPI_DEFAULT = 800;
+    /**
+     * Old saves stored `lookSensPercent`, where 100 % meant 0.004 rad per count.
+     * 0.004 rad = 0.2292°, and 0.2292 / 0.022 = 10.417 — so this converts a legacy percent
+     * into the sensitivity that feels identical and nobody's aim shifts under them.
+     */
+    const LEGACY_PERCENT_TO_SENS = 0.10417;
 
-    function clampLookSensPercent(p) {
+    function clampSens(v) {
       return THREE.MathUtils.clamp(
-        typeof p === "number" && Number.isFinite(p) ? p : LOOK_SENS_PERCENT_DEFAULT,
-        LOOK_SENS_PERCENT_MIN,
-        LOOK_SENS_PERCENT_MAX
+        typeof v === "number" && Number.isFinite(v) ? v : SENS_DEFAULT,
+        SENS_MIN,
+        SENS_MAX
       );
     }
 
-    function formatLookSensPercent(p) {
-      const v = clampLookSensPercent(p);
-      if (v < 10 || Math.abs(v - Math.round(v)) > 0.05) return `${v.toFixed(1)}%`;
-      return `${Math.round(v)}%`;
+    function clampAdsSensMul(v) {
+      return THREE.MathUtils.clamp(
+        typeof v === "number" && Number.isFinite(v) ? v : ADS_SENS_MUL_DEFAULT,
+        ADS_SENS_MUL_MIN,
+        ADS_SENS_MUL_MAX
+      );
+    }
+
+    function clampMouseDpi(v) {
+      return THREE.MathUtils.clamp(
+        typeof v === "number" && Number.isFinite(v) ? Math.round(v) : MOUSE_DPI_DEFAULT,
+        MOUSE_DPI_MIN,
+        MOUSE_DPI_MAX
+      );
+    }
+
+    /** eDPI — the number players actually compare between setups. */
+    function getEdpi() {
+      return clampMouseDpi(gameSettings.mouseDpi) * clampSens(gameSettings.sensitivity);
+    }
+
+    /** Centimetres of mouse travel for one full 360° turn. */
+    function getCmPer360() {
+      const edpi = getEdpi();
+      if (edpi <= 0) return 0;
+      return (360 / (edpi * MOUSE_YAW_DEG_PER_COUNT)) * 2.54;
     }
 
     function isAdsLookSensitivityActive() {
@@ -225,11 +270,12 @@
       );
     }
 
-    function getLookSensitivityMul(ads = false) {
-      const p = ads
-        ? clampLookSensPercent(gameSettings.adsLookSensPercent)
-        : clampLookSensPercent(gameSettings.lookSensPercent);
-      return p / 100;
+    /** Radians of view rotation per mouse count, for both yaw and pitch. */
+    function radiansPerMouseCount(ads = false) {
+      const s =
+        clampSens(gameSettings.sensitivity) *
+        (ads ? clampAdsSensMul(gameSettings.adsSensMultiplier) : 1);
+      return THREE.MathUtils.degToRad(MOUSE_YAW_DEG_PER_COUNT * s);
     }
 
     /** Scales fog far plane (and matching near) — lower = darkness closes in sooner. */
@@ -278,8 +324,9 @@
       qualityIndex: 1,
       texturesOn: true,
       renderDistanceIndex: 2,
-      lookSensPercent: LOOK_SENS_PERCENT_DEFAULT,
-      adsLookSensPercent: LOOK_SENS_PERCENT_DEFAULT,
+      mouseDpi: MOUSE_DPI_DEFAULT,
+      sensitivity: SENS_DEFAULT,
+      adsSensMultiplier: ADS_SENS_MUL_DEFAULT,
       skipClickToPlay: false,
       language: "en",
       // Multiplayer server source. "default" = use the meta tag (chat.jimmyqrg.com
@@ -312,11 +359,22 @@
         if (typeof o.language === "string" && LANGUAGE_OPTIONS.includes(o.language)) {
           gameSettings.language = o.language;
         }
-        if (typeof o.lookSensPercent === "number") {
-          gameSettings.lookSensPercent = clampLookSensPercent(o.lookSensPercent);
+        if (typeof o.mouseDpi === "number") gameSettings.mouseDpi = clampMouseDpi(o.mouseDpi);
+        if (typeof o.sensitivity === "number") {
+          gameSettings.sensitivity = clampSens(o.sensitivity);
+        } else if (typeof o.lookSensPercent === "number") {
+          // Legacy save: convert the old percent so the player's aim feels unchanged.
+          gameSettings.sensitivity = clampSens(o.lookSensPercent * LEGACY_PERCENT_TO_SENS);
         }
-        if (typeof o.adsLookSensPercent === "number") {
-          gameSettings.adsLookSensPercent = clampLookSensPercent(o.adsLookSensPercent);
+        if (typeof o.adsSensMultiplier === "number") {
+          gameSettings.adsSensMultiplier = clampAdsSensMul(o.adsSensMultiplier);
+        } else if (
+          typeof o.adsLookSensPercent === "number" &&
+          typeof o.lookSensPercent === "number" &&
+          o.lookSensPercent > 0
+        ) {
+          // Old ADS sens was an absolute percent; the new one is a ratio of the base sens.
+          gameSettings.adsSensMultiplier = clampAdsSensMul(o.adsLookSensPercent / o.lookSensPercent);
         }
         if (typeof o.skipClickToPlay === "boolean") {
           gameSettings.skipClickToPlay = o.skipClickToPlay;
@@ -2691,6 +2749,9 @@
     }
 
     function getMapEnvColors() {
+      // Training gets its own warm daylight sky — the shared cool-grey bright-map palette
+      // made the range look overcast and lifeless.
+      if (isTrainingMap(CURRENT_MAP)) return { fog: 0xcfe2f2, bg: 0xdcecfb };
       if (isBrightIndoorMap(CURRENT_MAP)) return { fog: 0x8ea6c6, bg: 0xa9c3e6 };
       if (isBossArenaMap(CURRENT_MAP)) return { fog: 0x1a1a22, bg: 0x1a1a22 };
       return { fog: 0x070504, bg: 0x070504 };
@@ -3564,13 +3625,30 @@
       }
     }
 
+    /** Warm sand the training range's concrete is tinted toward, floor included. */
+    const TRAINING_WARM_TINT = 0xffe9c8;
+    const TRAINING_FLOOR_TINT = 0xb9a887;
+
     function resolveWallTint(color) {
+      const training = isTrainingMap(CURRENT_MAP);
       const defaultTint = isBrightIndoorMap(CURRENT_MAP) ? 0x8a96a8 : 0x6b7384;
       const base = color != null ? color : defaultTint;
       if (!isBrightIndoorMap(CURRENT_MAP)) return base;
       const c = new THREE.Color(base);
-      c.lerp(new THREE.Color(0xffffff), 0.2);
+      // The shared bright-map lift (0.2 toward white) still left the range looking like an
+      // overcast car park. Training pulls much harder, and toward warm sunlight rather than
+      // white, so the concrete reads as sunlit instead of grey.
+      if (training) c.lerp(new THREE.Color(TRAINING_WARM_TINT), 0.55);
+      else c.lerp(new THREE.Color(0xffffff), 0.2);
       return c.getHex();
+    }
+
+    /** The one shared ground plane is re-tinted per map; training gets warm sand. */
+    function setFloorTint(tint) {
+      const rep = worldSize / FLOOR_CEILING_METERS_PER_REPEAT;
+      floor.material = getWallMaterialCached(rep, rep, tint);
+      const entry = _texturedMeshes.find((e) => e.mesh === floor);
+      if (entry) entry.tint = tint;
     }
 
     function addWallBox(w, h, d, x, y, z, color = 0x6b7384) {
@@ -4443,6 +4521,7 @@
     function clearMap() {
       clearAllMazeChunks();
       clearPvpMapLights();
+      setFloorTint(0x666670); // undo any per-map floor tint (training warms it up)
       while (wallMeshes.length) {
         const mesh = wallMeshes.pop();
         scene.remove(mesh);
@@ -4944,24 +5023,35 @@
         [-20, -34], [0, -34], [20, -34],
         [0, -40], [-9, -44], [9, -44], [-24, -42], [24, -42],
       ];
+      // v7: the range was lit like a basement. Everything below is warmer and roughly
+      // twice as strong, and the ceiling stays open so it reads as an outdoor range in
+      // daylight rather than a grey box.
       for (const [lx, lz] of lightPos) {
-        const L = createPhysicalPointLight(0xfff6ee, 480, 140, 2.2);
-        L.position.set(lx, H + 1.1, lz);
+        const L = createPhysicalPointLight(0xfff1dc, 620, 165, 2.0);
+        L.position.set(lx, H + 1.4, lz);
         L.castShadow = false;
         scene.add(L);
         pvpMapLights.push(L);
       }
-      const ambFill = new THREE.AmbientLight(0xd4e2f5, 2.1);
+      const ambFill = new THREE.AmbientLight(0xffeedd, 3.4);
       scene.add(ambFill);
       pvpMapLights.push(ambFill);
-      const hemiFill = new THREE.HemisphereLight(0xeef6ff, 0x5c5348, 4.2);
+      // Warm sun above, sandy bounce from below — the old ground colour was near-black.
+      const hemiFill = new THREE.HemisphereLight(0xfff4e2, 0xb0a184, 6.4);
       scene.add(hemiFill);
       pvpMapLights.push(hemiFill);
-      const sunFill = new THREE.DirectionalLight(0xfff6ea, 9.5);
-      sunFill.position.set(18, 42, 14);
+      const sunFill = new THREE.DirectionalLight(0xfff2d2, 16.0);
+      sunFill.position.set(26, 48, 20);
       sunFill.castShadow = false;
       scene.add(sunFill);
       pvpMapLights.push(sunFill);
+      // Low warm back-fill so the far end of the extended range isn't a dark hole.
+      setFloorTint(TRAINING_FLOOR_TINT);
+      const backFill = new THREE.DirectionalLight(0xffe6c0, 5.0);
+      backFill.position.set(-14, 16, -46);
+      backFill.castShadow = false;
+      scene.add(backFill);
+      pvpMapLights.push(backFill);
       ceiling.visible = false;
     }
 
@@ -12132,9 +12222,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       if (!gameSettings.skipClickToPlay || state.locked || !gameWorldReady) return;
       if (paused || player.health <= 0) return;
       if (dx === 0 && dy === 0) return;
-      const sens = getLookSensitivityMul(isAdsLookSensitivityActive());
-      const dYaw = -dx * LOOK_SENS_BASE_YAW * sens * 0.28;
-      const dPitch = -dy * LOOK_SENS_BASE_PITCH * sens * 0.28;
+      const rpc = radiansPerMouseCount(isAdsLookSensitivityActive());
+      const dYaw = -dx * rpc * 0.28;
+      const dPitch = -dy * rpc * 0.28;
       player.yaw += dYaw;
       player.pitch += dPitch;
       consumeRecoilCompensation(dPitch, dYaw);
@@ -12165,9 +12255,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       if (!controlsInputReady() || paused || player.health <= 0) return;
       if (!state.locked) return;
 
-      const sens = getLookSensitivityMul(isAdsLookSensitivityActive());
-      const dYaw = -e.movementX * LOOK_SENS_BASE_YAW * sens;
-      const dPitch = -e.movementY * LOOK_SENS_BASE_PITCH * sens;
+      const rpc = radiansPerMouseCount(isAdsLookSensitivityActive());
+      const dYaw = -e.movementX * rpc;
+      const dPitch = -e.movementY * rpc;
       player.yaw += dYaw;
       player.pitch += dPitch;
       consumeRecoilCompensation(dPitch, dYaw);
@@ -12993,6 +13083,95 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       // idle
       jt.netState = 0;
       if (jetRoot) jetRoot.visible = false;
+    }
+
+    // ── Altitude gauge (right edge, shown while airborne) ─────────────────────
+    // Fall damage is invisible without this: you cannot tell from a first-person view how
+    // far off the deck you are, so the only feedback was dying. The bar reads the drop you
+    // would take if you let go right now, with the lethal band marked in red.
+    let _altGaugeEl = null;
+    let _altFillEl = null;
+    let _altTextEl = null;
+    let _altTickEl = null;
+    /** Top of the scale — a bit above the lethal line so the red band is visible. */
+    const ALT_GAUGE_MAX = 20;
+
+    function buildAltGauge() {
+      if (_altGaugeEl) return;
+      const wrap = document.createElement("div");
+      wrap.id = "jetAltGauge";
+      wrap.style.cssText =
+        "position:fixed;right:46px;top:50%;transform:translateY(-50%);z-index:44;" +
+        "display:none;flex-direction:column;align-items:center;gap:6px;" +
+        "pointer-events:none;user-select:none;font-family:var(--game-font-ui);";
+
+      const txt = document.createElement("div");
+      txt.style.cssText =
+        "font-size:15px;letter-spacing:1px;color:#8de08d;text-shadow:0 1px 4px rgba(0,0,0,0.9);";
+
+      const track = document.createElement("div");
+      track.style.cssText =
+        "position:relative;width:20px;height:260px;border-radius:10px;overflow:hidden;" +
+        "background:linear-gradient(180deg,rgba(12,14,18,0.92),rgba(0,0,0,0.7));" +
+        "border:1px solid rgba(255,255,255,0.18);box-shadow:0 2px 10px rgba(0,0,0,0.65);";
+
+      // Lethal band: everything at or above JET_FATAL_FALL_DROP on the scale.
+      const danger = document.createElement("div");
+      const dangerFrac = 1 - JET_FATAL_FALL_DROP / ALT_GAUGE_MAX;
+      danger.style.cssText =
+        "position:absolute;left:0;right:0;top:0;height:" + (dangerFrac * 100).toFixed(1) + "%;" +
+        "background:repeating-linear-gradient(45deg,rgba(255,40,40,0.30) 0 6px,rgba(255,40,40,0.14) 6px 12px);";
+      track.appendChild(danger);
+
+      const tick = document.createElement("div");
+      tick.style.cssText =
+        "position:absolute;left:0;right:0;top:" + (dangerFrac * 100).toFixed(1) + "%;" +
+        "height:2px;background:#ff4040;box-shadow:0 0 6px rgba(255,60,60,0.9);";
+      track.appendChild(tick);
+
+      const fill = document.createElement("div");
+      fill.style.cssText =
+        "position:absolute;left:0;right:0;bottom:0;height:0%;" +
+        "background:linear-gradient(180deg,#65ff8f,#17c85b);" +
+        "box-shadow:inset 0 1px 0 rgba(255,255,255,0.3);transition:height 0.05s linear;";
+      track.appendChild(fill);
+
+      wrap.appendChild(txt);
+      wrap.appendChild(track);
+      document.body.appendChild(wrap);
+
+      _altGaugeEl = wrap;
+      _altFillEl = fill;
+      _altTextEl = txt;
+      _altTickEl = tick;
+    }
+
+    function updateAltGauge() {
+      buildAltGauge();
+      if (!_altGaugeEl) return;
+      const inGame = gameWorldReady && menuEl && menuEl.style.display === "none";
+      // Height you would fall from right now (floor sits at eye level 1.65).
+      const drop = player.position.y - 1.65;
+      const show = inGame && player.health > 0 && (drop > 0.6 || state.jet.phase !== "idle");
+      _altGaugeEl.style.display = show ? "flex" : "none";
+      if (!show) return;
+
+      const frac = THREE.MathUtils.clamp(drop / ALT_GAUGE_MAX, 0, 1);
+      _altFillEl.style.height = (frac * 100).toFixed(1) + "%";
+
+      let color = "#17c85b";
+      let label = "#8de08d";
+      if (drop >= JET_FATAL_FALL_DROP) {
+        color = "#ff2f2f";
+        label = "#ff6a6a";
+      } else if (drop >= JET_FALL_WARN_DROP) {
+        color = "#ffb21f";
+        label = "#ffd07a";
+      }
+      _altFillEl.style.background = `linear-gradient(180deg, ${color}, ${color})`;
+      _altTextEl.style.color = label;
+      _altTextEl.textContent =
+        drop.toFixed(1) + "m" + (drop >= JET_FATAL_FALL_DROP ? "  ☠" : "");
     }
 
     function updateJetHud() {
@@ -14643,17 +14822,18 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       lblMusicVol.textContent = `${rngMusicVol.value}%`;
       lblSfxVol.textContent = `${rngSfxVol.value}%`;
       if (rngLookSens && lblLookSens) {
-        const ls = clampLookSensPercent(gameSettings.lookSensPercent);
-        gameSettings.lookSensPercent = ls;
-        rngLookSens.value = String(ls);
-        lblLookSens.textContent = formatLookSensPercent(ls);
+        const sv = clampSens(gameSettings.sensitivity);
+        gameSettings.sensitivity = sv;
+        rngLookSens.value = String(sv);
+        lblLookSens.textContent = sv.toFixed(2);
       }
       if (rngAdsLookSens && lblAdsLookSens) {
-        const ads = clampLookSensPercent(gameSettings.adsLookSensPercent);
-        gameSettings.adsLookSensPercent = ads;
-        rngAdsLookSens.value = String(ads);
-        lblAdsLookSens.textContent = formatLookSensPercent(ads);
+        const am = clampAdsSensMul(gameSettings.adsSensMultiplier);
+        gameSettings.adsSensMultiplier = am;
+        rngAdsLookSens.value = String(am);
+        lblAdsLookSens.textContent = `${am.toFixed(2)}×`;
       }
+      syncSensReadout();
       qualityLabel.textContent = QUALITY_LABELS[gameSettings.qualityIndex] || "REGULAR";
       textureLabel.textContent = gameSettings.texturesOn ? "ON" : "OFF";
       const rdi = THREE.MathUtils.clamp(
@@ -14670,6 +14850,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
     }
 
     function openSettingsModal() {
+      buildSensitivityControls();
       settingsModalOpen = true;
       syncSettingsUI();
       settingsModal.style.display = "flex";
@@ -16319,6 +16500,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       updateSpeedNeedle(dt);
       updateJetHarness(dt);
       updateJetHud();
+      updateAltGauge();
       updateHealthBarHud();
 
       if (isArenaLikeMap(CURRENT_MAP) || isBossArenaMap(CURRENT_MAP)) {
@@ -17197,19 +17379,97 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
     // 3D scene is always on. The boot path unconditionally calls
     // initMenuWallBackdrop().)
 
-    function bindLookSensSlider(rangeEl, labelEl, key) {
+    /**
+     * The DPI field + eDPI / cm-360 readout are built here instead of in index.html so this
+     * whole sensitivity change stays inside main.js. DPI is not used by the aim maths at all
+     * — it exists purely so the readout can show numbers you can compare with other games.
+     */
+    let _dpiInput = null;
+    let _sensReadoutEl = null;
+
+    function buildSensitivityControls() {
+      const hint = document.getElementById("lookSensHint");
+      if (!hint || _dpiInput) return;
+
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap;";
+
+      const lab = document.createElement("label");
+      lab.textContent = tr("mouseDpiLabel", "Mouse DPI");
+      lab.style.cssText = "font-size:13px;opacity:0.9;font-family:var(--game-font-ui);";
+
+      const inp = document.createElement("input");
+      inp.type = "number";
+      inp.min = String(MOUSE_DPI_MIN);
+      inp.max = String(MOUSE_DPI_MAX);
+      inp.step = "50";
+      inp.value = String(clampMouseDpi(gameSettings.mouseDpi));
+      inp.style.cssText =
+        "width:110px;padding:7px 10px;font-size:14px;font-family:var(--game-font-ui);" +
+        "background:#0d111b;color:#fff;border:1.5px solid rgba(120,200,255,0.55);" +
+        "border-radius:6px;outline:none;";
+      inp.addEventListener("input", () => {
+        gameSettings.mouseDpi = clampMouseDpi(+inp.value);
+        syncSensReadout();
+      });
+      inp.addEventListener("change", () => {
+        inp.value = String(clampMouseDpi(gameSettings.mouseDpi));
+        saveGameSettings();
+      });
+
+      const readout = document.createElement("div");
+      readout.style.cssText =
+        "font-size:13px;font-family:var(--game-font-ui);color:#7ec8ff;letter-spacing:0.5px;";
+
+      row.appendChild(lab);
+      row.appendChild(inp);
+      row.appendChild(readout);
+      hint.parentNode.insertBefore(row, hint);
+
+      _dpiInput = inp;
+      _sensReadoutEl = readout;
+
+      hint.textContent = tr(
+        "sensHintNew",
+        "Same maths as other shooters: degrees/count = sensitivity × 0.022. " +
+          "DPI is only used to show eDPI and cm/360 — it does not change your aim."
+      );
+      syncSensReadout();
+    }
+
+    function syncSensReadout() {
+      if (!_sensReadoutEl) return;
+      if (_dpiInput && document.activeElement !== _dpiInput) {
+        _dpiInput.value = String(clampMouseDpi(gameSettings.mouseDpi));
+      }
+      const edpi = getEdpi();
+      const cm = getCmPer360();
+      _sensReadoutEl.textContent = `eDPI ${Math.round(edpi)}  ·  ${cm.toFixed(1)} cm/360°`;
+    }
+
+    /**
+     * Sensitivity / ADS-multiplier sliders. The <input> min/max/step come from the old
+     * percent scale, so they are re-ranged here rather than in index.html — that keeps this
+     * whole change JS-only.
+     */
+    function bindSensSlider(rangeEl, labelEl, key, clampFn, min, max, step, fmt) {
       if (!rangeEl || !labelEl) return;
+      rangeEl.min = String(min);
+      rangeEl.max = String(max);
+      rangeEl.step = String(step);
       rangeEl.addEventListener("input", () => {
-        const v = clampLookSensPercent(+rangeEl.value || LOOK_SENS_PERCENT_DEFAULT);
+        const v = clampFn(+rangeEl.value);
         gameSettings[key] = v;
         rangeEl.value = String(v);
-        labelEl.textContent = formatLookSensPercent(v);
+        labelEl.textContent = fmt(v);
+        syncSensReadout();
       });
-      // Persist only when the drag settles.
       rangeEl.addEventListener("change", saveGameSettings);
     }
-    bindLookSensSlider(rngLookSens, lblLookSens, "lookSensPercent");
-    bindLookSensSlider(rngAdsLookSens, lblAdsLookSens, "adsLookSensPercent");
+    bindSensSlider(rngLookSens, lblLookSens, "sensitivity", clampSens,
+      SENS_MIN, SENS_MAX, 0.01, (v) => v.toFixed(2));
+    bindSensSlider(rngAdsLookSens, lblAdsLookSens, "adsSensMultiplier", clampAdsSensMul,
+      ADS_SENS_MUL_MIN, ADS_SENS_MUL_MAX, 0.01, (v) => `${v.toFixed(2)}×`);
 
     function cycleQuality(delta) {
       gameSettings.qualityIndex = (gameSettings.qualityIndex + delta + QUALITY_LEVELS.length) % QUALITY_LEVELS.length;
