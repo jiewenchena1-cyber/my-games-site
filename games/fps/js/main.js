@@ -298,6 +298,7 @@
       { id: "moveRight",   label: "Move right",        def: "KeyD" },
       { id: "jump",        label: "Jump",              def: "Space" },
       { id: "aim",         label: "Aim / ADS",         def: "ShiftLeft" },
+      { id: "crouch",      label: "Crouch",            def: "ControlLeft" },
       { id: "dash",        label: "Dash",              def: "KeyC" },
       { id: "reload",      label: "Reload",            def: "KeyR" },
       { id: "heal",        label: "Heal / Med-kit",    def: "KeyF" },
@@ -1280,6 +1281,7 @@
       rp.ads = !!data.ads;
       // Jet harness. Absent field (older client / never used) means 0 — no pack is shown.
       rp.jetState = THREE.MathUtils.clamp(Number(data.jet) | 0, 0, 2);
+      rp.crouch = THREE.MathUtils.clamp((Number(data.crouch) || 0) / 100, 0, 1);
       applyRemoteJetPack(rp);
       rp.remotePitch =
         typeof data.pitch === "number"
@@ -4943,6 +4945,8 @@
       { name: "WALK", dur: 3.4, weapon: 1, move: 2.0, range: 3.2 },
       { name: "RUN", dur: 3.4, weapon: 1, move: 6.2, range: 5.0 },
       { name: "JUMP", dur: 2.6, weapon: 1, jump: true },
+      { name: "CROUCH", dur: 2.4, weapon: 1, crouch: true },
+      { name: "CROUCH — WALK", dur: 3.2, weapon: 1, crouch: true, move: 1.5, range: 2.4 },
       { name: "AIM + FIRE", dur: 3.2, weapon: 1, ads: true, fire: 0.1 },
       { name: "RELOAD", dur: 2.6, weapon: 1, reload: true },
       { name: "SHOTGUN", dur: 2.0, weapon: 2, fire: 0.52 },
@@ -5079,6 +5083,7 @@
       }
       rp.isReloading = !!cur.reload;
       rp.ads = !!cur.ads;
+      rp.crouch = cur.crouch ? 1 : 0;
       rp.remotePitch = cur.ads ? -0.05 : 0;
 
       // Movement: strafe along X so the gait is visible side-on from the firing line.
@@ -5418,7 +5423,12 @@
       fallApexY: null,
     };
 
-    const keys = { w:false, a:false, s:false, d:false, space:false, shift:false, f:false, v:false };
+    const keys = { w:false, a:false, s:false, d:false, space:false, shift:false, f:false, v:false, crouch:false };
+    // Crouch depth, 0..1. Smoothed rather than binary so the camera and the avatar ease
+    // down instead of snapping, and so a tap reads as a dip.
+    const CROUCH_EYE_DROP = 0.62;   // metres the camera falls at full crouch
+    const CROUCH_SPEED_MUL = 0.45;  // walk speed multiplier while fully crouched
+    let crouchAmt = 0;
     const state = {
       locked: false,
       mouseDown: false,
@@ -5761,6 +5771,96 @@
       7: true,   // Knife — always
       8: false,  // ～～～ — special
     };
+    /* ── Loadout / backpack ────────────────────────────────────────────────
+     * Outside the training range you no longer walk in with the whole armoury. You pick
+     * TWO guns in the main menu; the med kit and the knife always come along; the speed
+     * needle and the jet harness are gear, not weapons, so they are never restricted.
+     * The pick is frozen the moment a match starts (`activeLoadout`) and can only be
+     * changed by backing out to the menu — that is what makes it a loadout rather than a
+     * settings screen.
+     *
+     * `activeLoadout === null` means "no restriction" and is what the training range uses.
+     */
+    const LOADOUT_GUN_POOL = [0, 2, 3, 1, 5, 6];  // Pistol, Shotgun, SMG, AR, AMR, Dart
+    const LOADOUT_MED = 4;
+    const LOADOUT_KNIFE = 7;
+    const LOADOUT_HIDDEN = 8;                     // ～～～ — never counts against the limit
+    const LOADOUT_MAX_GUNS = 2;
+    const LOADOUT_STORAGE_KEY = "fps_loadout_v1";
+    let loadoutGuns = [0, 2];
+    let activeLoadout = null;
+
+    /** Drop anything locked/invalid, then top back up to two so you never spawn gunless. */
+    function sanitizeLoadoutSelection() {
+      const seen = new Set();
+      loadoutGuns = loadoutGuns.filter((i) => {
+        if (!LOADOUT_GUN_POOL.includes(i) || !weaponUnlocked[i] || seen.has(i)) return false;
+        seen.add(i);
+        return true;
+      }).slice(0, LOADOUT_MAX_GUNS);
+      for (const g of LOADOUT_GUN_POOL) {
+        if (loadoutGuns.length >= LOADOUT_MAX_GUNS) break;
+        if (weaponUnlocked[g] && !loadoutGuns.includes(g)) loadoutGuns.push(g);
+      }
+      if (!loadoutGuns.length) loadoutGuns = [0];
+    }
+
+    function saveLoadout() {
+      try { localStorage.setItem(LOADOUT_STORAGE_KEY, JSON.stringify(loadoutGuns)); } catch (_) {}
+    }
+
+    function loadLoadout() {
+      try {
+        const raw = JSON.parse(localStorage.getItem(LOADOUT_STORAGE_KEY) || "null");
+        if (Array.isArray(raw)) loadoutGuns = raw.map((n) => n | 0);
+      } catch (_) {}
+      sanitizeLoadoutSelection();
+    }
+
+    /** Freeze the pick for the match about to start. Training range stays unrestricted. */
+    function lockLoadoutForMap(mapName) {
+      if (isTrainingMap(mapName)) { activeLoadout = null; return; }
+      sanitizeLoadoutSelection();
+      activeLoadout = loadoutGuns.slice();
+    }
+    function clearActiveLoadout() { activeLoadout = null; }
+
+    function weaponInLoadout(idx) {
+      if (!activeLoadout) return true;
+      if (idx === LOADOUT_MED || idx === LOADOUT_KNIFE || idx === LOADOUT_HIDDEN) return true;
+      return activeLoadout.includes(idx);
+    }
+    /** The single gate every weapon-selection path goes through. */
+    function weaponAvailable(idx) {
+      return !!weaponUnlocked[idx] && weaponInLoadout(idx);
+    }
+
+    /**
+     * What the number keys and the hotbar show right now. Unrestricted maps keep the
+     * player's own drag-to-reorder layout; a loadout match gets a compact 1/2/3 + 0 bar.
+     */
+    // Own copy of the key labels rather than a reference to INV_KEY_LABELS: the HUD calls
+    // this during early init, well before that const is initialised, and reaching for it
+    // there threw a TDZ ReferenceError that aborted the whole module.
+    const LOADOUT_SLOT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "0"];
+    function activeHotbarSlots() {
+      if (!activeLoadout) {
+        return gameSettings.weaponSlotOrder.map((w, i) => ({ key: LOADOUT_SLOT_KEYS[i], widx: w }));
+      }
+      const out = activeLoadout.map((w, i) => ({ key: String(i + 1), widx: w }));
+      out.push({ key: String(out.length + 1), widx: LOADOUT_MED });
+      out.push({ key: "0", widx: LOADOUT_KNIFE });
+      return out;
+    }
+
+    /** After a lock-in, hop off any gun that is no longer in the bag. */
+    function ensureWeaponAllowed() {
+      if (weaponAvailable(state.weaponIndex)) return;
+      for (const s of activeHotbarSlots()) {
+        if (weaponAvailable(s.widx)) { setWeapon(s.widx); return; }
+      }
+    }
+
     let totalKillCount = 0;
     let bossKillCount = 0;
 
@@ -6411,6 +6511,7 @@
     }
 
     loadUnlocks();
+    loadLoadout();
 
     const WEAPON_UNLOCK_TABLE = [
       { idx: 2, kills: 10, bossKills: 0, label: "霰弹枪 (Shotgun)" },
@@ -6451,8 +6552,10 @@
       // Peek the hotbar even when the slot is locked, so pressing a number always tells the
       // player what is in that slot and whether they own it yet.
       flashInvBar();
-      if (weaponUnlocked[idx]) {
+      if (weaponAvailable(idx)) {
         setWeapon(idx);
+      } else if (weaponUnlocked[idx] && !weaponInLoadout(idx)) {
+        showCombatFeedback(tr("loadoutNotPacked", "NOT IN YOUR BACKPACK"), "#ff9d3d", 0.3);
       }
     }
 
@@ -6542,6 +6645,7 @@
       const K = (action) => `<b style="color:#8fd8ff;">${codeToLabel(kbCode(action))}</b>`;
       const hudHelpMove = `${tr("hudLblMove", "Move")} ${K("moveForward")}${K("moveLeft")}${K("moveBack")}${K("moveRight")}` +
         ` · ${tr("hudLblJump", "Jump")} ${K("jump")}` +
+        ` · ${tr("hudLblCrouch", "Crouch")} ${K("crouch")}` +
         ` · ${tr("hudLblDash", "Dash")} ${K("dash")}`;
       const hudHelpAim = `${tr("hudLblFire", "Fire")} <b style="color:#8fd8ff;">LMB</b>/${K("fire")}` +
         ` · ${tr("hudLblAim", "Aim")} <b style="color:#8fd8ff;">RMB</b>/${K("aim")}` +
@@ -6555,18 +6659,20 @@
         ` · ${tr("hudLblQuests", "Quests")} ${K("questHud")}` +
         ` · ${tr("hudLblPause", "Pause")} <b style="color:#8fd8ff;">Esc</b>`;
       const hudHelpWeapons = (() => {
-        const slotKeys = ["1", "2", "3", "4", "5", "6", "7", "0"];
-        const order = Array.isArray(gameSettings.weaponSlotOrder) ? gameSettings.weaponSlotOrder : [];
-        const parts = order.map((widx, i) => {
+        // Loadout matches list exactly what you packed; the training range still lists the
+        // whole armoury with its lock markers. The hidden gun is never printed here.
+        const parts = activeHotbarSlots().map(({ key, widx }) => {
           const owned = weaponUnlocked[widx];
-          const key = `<b style="color:${owned ? "#8fd8ff" : "#6b7280"};">${slotKeys[i] || "?"}</b>`;
+          const keyEl = `<b style="color:${owned ? "#8fd8ff" : "#6b7280"};">${key || "?"}</b>`;
           const nm = owned
             ? weaponDisplayName(widx)
             : `<span style="color:#6b7280;">${weaponDisplayName(widx)} 🔒</span>`;
-          return `${key} ${nm}`;
+          return `${keyEl} ${nm}`;
         });
-        if (DEV_GUN_UNLOCKED) parts.push(`<b style="color:#ffd700;">/</b> <span style="color:#ffd700;">～～～</span>`);
-        return `${tr("hudLblWeapons", "Weapons")}: ${parts.join(" · ")}`;
+        const label = activeLoadout
+          ? tr("hudLblBackpack", "Backpack")
+          : tr("hudLblWeapons", "Weapons");
+        return `${label}: ${parts.join(" · ")}`;
       })();
       const hudMpTag      = tr("hudMpTag",      " (MP)");
       const hudMapLabel   = tr("hudMap",        "Map");
@@ -6592,7 +6698,7 @@
       } else if (state.weaponIndex === 7) {
         weaponLine = `${tr("hudMeleeLine", "Melee: front 2-hit kill | <b>backstab 1-hit kill</b>")}<br>`;
       } else if (state.weaponIndex === 8) {
-        weaponLine = `<b style="color:#ffd700;">～～～ — ∞ | 7500</b><br>`;
+        weaponLine = `<b style="color:#ffd700;">∞ | 7500</b><br>`;
       } else {
         weaponLine = `${hudBulletsLbl}: ${w.ammo} / ${w.magSize}${state.reloading ? `（${hudRefilling}）` : ""}<br>`;
       }
@@ -8819,10 +8925,13 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       _invBar.innerHTML = "";
       _invSlotEls.length = 0;
       _invCanvases.length = 0;
-      const order = gameSettings.weaponSlotOrder;
-      // 8 configurable + 1 fixed (～～～)
-      const allSlots = [...order, 8];
-      allSlots.forEach((widx, slotIdx) => {
+      // Loadout matches show only what you packed. Unrestricted maps keep the full bar
+      // (8 configurable + the fixed hidden slot).
+      const slotDefs = activeLoadout
+        ? activeHotbarSlots()
+        : [...gameSettings.weaponSlotOrder.map((w, i) => ({ key: LOADOUT_SLOT_KEYS[i], widx: w })),
+           { key: "/", widx: 8 }];
+      slotDefs.forEach(({ key: slotKey, widx }, slotIdx) => {
         const div = document.createElement("div");
         div.className = "inv-slot";
         div.dataset.slot = slotIdx;
@@ -8830,7 +8939,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         // key label
         const keyEl = document.createElement("div");
         keyEl.className = "inv-key";
-        keyEl.textContent = INV_KEY_LABELS[slotIdx] || "";
+        keyEl.textContent = slotKey || "";
         // canvas
         const cnv = document.createElement("canvas");
         cnv.width = INV_CW; cnv.height = INV_CH;
@@ -8893,7 +9002,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         const active = widx === curW;
         div.classList.toggle("inv-active", active);
         // refresh lock status
-        div.classList.toggle("inv-locked", widx !== 8 && !weaponUnlocked[widx]);
+        div.classList.toggle("inv-locked", widx !== 8 && !weaponAvailable(widx));
       });
     }
 
@@ -12297,10 +12406,17 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       if (isAction(e, "jump")) keys.space = true;
       if (isAction(e, "aim")) keys.shift = true;
       if (isAction(e, "heal")) keys.f = true;
+      // Deliberately NOT preventDefault'd — swallowing ControlLeft would break every
+      // browser chord (Ctrl+R, Ctrl+W) while the game has focus.
+      if (isAction(e, "crouch")) keys.crouch = true;
       // Hotbar keys — order follows gameSettings.weaponSlotOrder
       { const _sk = ["1","2","3","4","5","6","7","0"];
         const _si = _sk.indexOf(k);
-        if (_si >= 0) trySelectWeapon(gameSettings.weaponSlotOrder[_si]); }
+        if (_si >= 0) {
+          const _slot = activeHotbarSlots().find((sl) => sl.key === k);
+          // A key with nothing behind it still peeks the bar, so the layout is discoverable.
+          if (_slot) trySelectWeapon(_slot.widx); else flashInvBar();
+        } }
       if (k === "/" || e.code === "Slash") {
         e.preventDefault();
         if (DEV_GUN_UNLOCKED) weaponUnlocked[8] = true;
@@ -12385,6 +12501,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       if (isAction(e, "moveRight")) keys.d = false;
       if (isAction(e, "jump")) keys.space = false;
       if (isAction(e, "aim")) keys.shift = false;
+      if (isAction(e, "crouch")) keys.crouch = false;
       if (isAction(e, "heal")) {
         keys.f = false;
         if (state.weaponIndex === 4) state.medKitNeedsRelease = false;
@@ -12448,6 +12565,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       keys.space = false;
       keys.shift = false;
       keys.f = false;
+      keys.crouch = false;
       state.mouseDown = false;
       state.ads = false;
     }
@@ -14655,9 +14773,19 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         if (keys.a) move.sub(right);
       }
 
+      // Crouch depth. Ground only, and never mid-dash or mid-flight — crouching in the air
+      // would just be a free hitbox shrink.
+      {
+        const wantCrouch = keys.crouch && player.onGround && !_dashing && !isJetActive()
+          && player.health > 0 && !paused;
+        crouchAmt += ((wantCrouch ? 1 : 0) - crouchAmt) * Math.min(1, dt * 13);
+        if (crouchAmt < 0.001) crouchAmt = 0;
+      }
+
       if (move.lengthSq() > 0) {
         const _ndPhase = state.speedNeedle.phase;
-        const _ndMult = _ndPhase === 'boost' ? 2.0 : _ndPhase === 'weak' ? 0.25 : 1.0;
+        const _ndMult = (_ndPhase === 'boost' ? 2.0 : _ndPhase === 'weak' ? 0.25 : 1.0)
+          * (1 - (1 - CROUCH_SPEED_MUL) * crouchAmt);
         // Normalize first so we can capture the unit direction for the dash before
         // scaling by speed*dt. (State lookup is one branch cheaper than re-normalizing.)
         move.normalize();
@@ -14670,7 +14798,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         player.position.z = resolved.z;
       }
 
-      if (!_dashing && !healLock && !moveLocked && keys.space && player.onGround) {
+      // Stand up before you jump — otherwise crouch-spam would be a free bunny-hop.
+      if (!_dashing && !healLock && !moveLocked && keys.space && player.onGround && crouchAmt < 0.5) {
         player.velocityY = 5.8;
         player.onGround = false;
       }
@@ -14760,6 +14889,10 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
       camera.position.copy(player.position);
       camera.position.y += state.smoothHeadBob;
+      // Crouch is a camera offset, NOT a change to player.position — the physics body keeps
+      // its 1.65 eye reference, so ground snapping, fall damage and every wall test that
+      // hardcodes 1.65 keep working untouched.
+      camera.position.y -= CROUCH_EYE_DROP * crouchAmt;
       camera.rotation.y = player.yaw;
       camera.rotation.x = player.pitch;
       if (MULTIPLAYER) {
@@ -14777,6 +14910,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           // 0 none / 1 strapping in / 2 flying. Mirrors state.jet.phase exactly, so a player
           // who has not used the harness broadcasts 0 and never shows a pack on anyone's screen.
           jet: state.jet.netState | 0,
+          // Crouch depth 0..100, so opponents see the same posture — and the same smaller
+          // silhouette — you do. Absent on older clients → 0 → standing.
+          crouch: Math.round(crouchAmt * 100),
         });
       }
     }
@@ -16584,6 +16720,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           const rpGroundOffset = Math.max(0, (rp.visY || 1.65) - 1.65);
           rp.group.position.set(rp.visX, rpGroundOffset, rp.visZ);
           rp.group.rotation.y = rp.visYaw;
+          // Crouch posture, eased locally so a laggy packet stream still looks smooth.
+          rp.crouchAmt = dampScalar(rp.crouchAmt || 0, rp.crouch || 0, dt, 13);
+          const rpCrouch = rp.crouchAmt;
 
           const spx = rp._prevVisX ?? rp.visX;
           const spz = rp._prevVisZ ?? rp.visZ;
@@ -16609,8 +16748,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
             const bendR = idleBend + Math.max(0, Math.sin(rp.walkPhase)) * kneeAmp * (moving ? 1 : 0);
             const bendL = idleBend + Math.max(0, -Math.sin(rp.walkPhase)) * kneeAmp * (moving ? 1 : 0);
             const airBend = rpAirborne ? 0.55 : 0;
-            rp.rightKnee.rotation.x = dampScalar(rp.rightKnee.rotation.x, bendR + airBend, dt, 15);
-            rp.leftKnee.rotation.x = dampScalar(rp.leftKnee.rotation.x, bendL + airBend, dt, 15);
+            const crouchBend = 0.95 * rpCrouch;
+            rp.rightKnee.rotation.x = dampScalar(rp.rightKnee.rotation.x, bendR + airBend + crouchBend, dt, 15);
+            rp.leftKnee.rotation.x = dampScalar(rp.leftKnee.rotation.x, bendL + airBend + crouchBend, dt, 15);
           }
           // Body rises and falls twice per stride, and squashes briefly on touchdown.
           const wasAir = rp._wasAirborne === true;
@@ -16624,9 +16764,16 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           // to 16 cm through the ground. Scaling keeps the soles planted at y=0 and
           // compresses the body, which is what a landing actually looks like.
           rp.group.position.y += Math.max(0, rp.bodyBobY);
+          // Landing squash and crouch both ride the same vertical scale. Because incoming
+          // shots raycast the avatar's own meshes, a shorter model IS a shorter hitbox —
+          // crouching behind cover really does make you harder to hit, with no second
+          // hitbox to keep in sync.
           const sq = rp.landSquash;
-          if (sq > 0.001 || rp.group.scale.y !== 1) {
-            rp.group.scale.set(1 + sq * 0.045, 1 - sq * 0.09, 1 + sq * 0.045);
+          const crouchSquash = 1 - 0.30 * rpCrouch;
+          const wantSY = (1 - sq * 0.09) * crouchSquash;
+          const wantSXZ = (1 + sq * 0.045) * (1 + 0.07 * rpCrouch);
+          if (Math.abs(rp.group.scale.y - wantSY) > 1e-4 || Math.abs(rp.group.scale.x - wantSXZ) > 1e-4) {
+            rp.group.scale.set(wantSXZ, wantSY, wantSXZ);
           }
 
           if (rp.leftLeg && rp.rightLeg) {
@@ -16695,7 +16842,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
             const breath = moving ? 0 : Math.sin(rp.idlePhase * 0.9) * 0.02;
             rp.torsoMesh.rotation.x = dampScalar(
               rp.torsoMesh.rotation.x,
-              pitchBlend * 0.55 + runLean + breath - airTuck + rp.landSquash * 0.22,
+              pitchBlend * 0.55 + runLean + breath - airTuck + rp.landSquash * 0.22 + rpCrouch * 0.20,
               dt,
               11
             );
@@ -17156,6 +17303,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       pvpKillStreak = 0;
       reviveAdWatchedThisLife = false;
       loadUnlocks();
+      sanitizeLoadoutSelection();
       setWeapon(0);
 
       clearMap();
@@ -17242,7 +17390,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       }
       resetMedKitChargeState();
 
-      setWeapon(0);  // 入场默认持手枪
+      // Spawn holding the first gun in the backpack — pistol only if that is what you packed.
+      setWeapon(0);
+      ensureWeaponAllowed();
       updateHud();
 
       if (!started) {
@@ -17290,6 +17440,10 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
     }
 
     function startGame(mapName, multiplayer, arenaCoop, trainingCoop) {
+      // Freeze the backpack for this match — from here the pick is read-only until the
+      // player backs out to the menu (goToMenu clears it).
+      lockLoadoutForMap(mapName);
+      try { _buildInvBar(); } catch (_) {}
       void bootGame(mapName, multiplayer, arenaCoop, trainingCoop);
     }
 
@@ -17298,6 +17452,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
     }
 
     function goToMenu() {
+      clearActiveLoadout();
       hideDeathScreen();
       hidePause();
       closeSettingsModal();
@@ -17348,10 +17503,139 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
     }
 
     function showMenuPanel(id) {
-      const menuStart = document.getElementById("menuStart");
-      for (const p of [menuMain, menuStart, menuArenaMode, menuBossMode, menuBossDifficulty, menuTrainingMode, menuPvpMaps, menuLobby, menuJoinCode]) p.style.display = "none";
+      // Query-based rather than a hardcoded list, so panels injected from JS (the backpack
+      // screen) are hidden along with the rest instead of stacking on top of them.
+      for (const p of document.querySelectorAll("#menuMain, .menu-subpanel")) p.style.display = "none";
       clearLobbyErr();
       document.getElementById(id).style.display = "flex";
+    }
+
+    /* ── Backpack screen ──────────────────────────────────────────────────
+     * Built entirely from JS and injected into the existing menu markup, so index.html
+     * needs no changes. Pick up to two guns; the med kit, knife, speed needle and jet
+     * harness are shown as permanent kit and cannot be toggled.
+     */
+    let _loadoutPanel = null;
+    let _loadoutCards = [];
+
+    function loadoutCardStyle(selected, locked) {
+      const base = "display:flex;flex-direction:column;align-items:center;gap:6px;width:120px;"
+        + "padding:10px 8px;border-radius:10px;cursor:pointer;user-select:none;"
+        + "font:600 12px/1.25 Audiowide,Arial,sans-serif;text-align:center;transition:all .12s;";
+      if (locked) return base + "border:1px solid #3a4048;background:rgba(20,24,30,0.55);color:#5f6a76;cursor:not-allowed;";
+      if (selected) return base + "border:1px solid #4fd1ff;background:rgba(79,209,255,0.20);color:#dff6ff;box-shadow:0 0 12px rgba(79,209,255,0.35);";
+      return base + "border:1px solid #4a5460;background:rgba(20,24,30,0.75);color:#b9c4d0;";
+    }
+
+    function buildLoadoutPanel() {
+      const wrap = document.querySelector(".menu-panels-wrap");
+      if (!wrap || _loadoutPanel) return;
+      const panel = document.createElement("div");
+      panel.id = "menuLoadout";
+      panel.className = "menu-subpanel menu-subpanel--wide";
+      panel.style.display = "none";
+
+      const back = document.createElement("button");
+      back.type = "button";
+      back.className = "menu-float-icon menu-back-btn";
+      back.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+      back.addEventListener("click", () => showMenuPanel("menuMain"));
+
+      const h = document.createElement("h2");
+      h.className = "menu-title";
+      h.textContent = tr("loadoutTitle", "BACKPACK");
+
+      const desc = document.createElement("p");
+      desc.className = "menu-desc";
+      desc.id = "loadoutDesc";
+
+      const grid = document.createElement("div");
+      grid.style.cssText = "display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin:6px 0 14px 0;";
+
+      _loadoutCards = [];
+      for (const widx of LOADOUT_GUN_POOL) {
+        const card = document.createElement("div");
+        card.dataset.widx = widx;
+        const cnv = document.createElement("canvas");
+        cnv.width = INV_CW; cnv.height = INV_CH;
+        cnv.style.cssText = `width:${INV_CW}px;height:${INV_CH}px;`;
+        try { drawWeaponIcon(cnv.getContext("2d"), widx, INV_CW, INV_CH); } catch (_) {}
+        const nm = document.createElement("div");
+        card.appendChild(cnv);
+        card.appendChild(nm);
+        card.addEventListener("click", () => toggleLoadoutGun(widx));
+        grid.appendChild(card);
+        _loadoutCards.push({ card, nm, widx });
+      }
+
+      const fixed = document.createElement("div");
+      fixed.id = "loadoutFixed";
+      fixed.style.cssText = "font:600 12px/1.7 Audiowide,Arial,sans-serif;color:#9fb0c0;"
+        + "border-top:1px solid rgba(255,255,255,0.12);padding-top:10px;max-width:560px;margin:0 auto;";
+
+      panel.appendChild(back);
+      panel.appendChild(h);
+      panel.appendChild(desc);
+      panel.appendChild(grid);
+      panel.appendChild(fixed);
+      wrap.appendChild(panel);
+      _loadoutPanel = panel;
+
+      // Entry point on the main menu, right under Training Camp.
+      const main = document.getElementById("menuMain");
+      const trainBtn = document.getElementById("btnTraining");
+      if (main && trainBtn && !document.getElementById("btnLoadout")) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.id = "btnLoadout";
+        b.textContent = tr("btnLoadout", "BACKPACK");
+        b.addEventListener("click", () => { syncLoadoutPanel(); showMenuPanel("menuLoadout"); });
+        trainBtn.insertAdjacentElement("afterend", b);
+      }
+    }
+
+    function toggleLoadoutGun(widx) {
+      if (!weaponUnlocked[widx]) return;
+      const at = loadoutGuns.indexOf(widx);
+      if (at >= 0) {
+        // Never let the bag go empty — you would spawn with nothing but a knife.
+        if (loadoutGuns.length <= 1) return;
+        loadoutGuns.splice(at, 1);
+      } else {
+        // Full bag: the oldest pick drops out, so a click always does something visible.
+        if (loadoutGuns.length >= LOADOUT_MAX_GUNS) loadoutGuns.shift();
+        loadoutGuns.push(widx);
+      }
+      saveLoadout();
+      syncLoadoutPanel();
+    }
+
+    function syncLoadoutPanel() {
+      if (!_loadoutPanel) return;
+      sanitizeLoadoutSelection();
+      for (const { card, nm, widx } of _loadoutCards) {
+        const locked = !weaponUnlocked[widx];
+        const sel = loadoutGuns.includes(widx);
+        card.style.cssText = loadoutCardStyle(sel, locked);
+        const slot = sel ? ` <span style="color:#4fd1ff;">[${loadoutGuns.indexOf(widx) + 1}]</span>` : "";
+        nm.innerHTML = locked
+          ? `${weaponDisplayName(widx)} 🔒`
+          : `${weaponDisplayName(widx)}${slot}`;
+      }
+      const d = document.getElementById("loadoutDesc");
+      if (d) {
+        d.innerHTML = tr("loadoutDesc",
+          "Pick <b>{n}</b> guns. Locked once a match starts — back out to the menu to change it. "
+          + "The training range ignores the backpack and gives you everything.")
+          .replace("{n}", String(LOADOUT_MAX_GUNS))
+          + `<br><span style="color:#4fd1ff;">${loadoutGuns.length} / ${LOADOUT_MAX_GUNS}</span>`;
+      }
+      const f = document.getElementById("loadoutFixed");
+      if (f) {
+        f.innerHTML = `<b style="color:#dfe8f2;">${tr("loadoutAlways", "Always carried")}:</b> `
+          + `${weaponDisplayName(LOADOUT_MED)} · ${weaponDisplayName(LOADOUT_KNIFE)} · `
+          + `${tr("needleName", "Speed Needle")} · ${tr("jetName", "Jet Harness")}`;
+      }
     }
 
     function showLobby(mode, title) {
@@ -17965,3 +18249,13 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         requestAnimationFrame(() => syncGameRendererSize());
       });
     } catch (_) {}
+
+    // Backpack screen. Built last, once every declaration above has been evaluated —
+    // calling it earlier hit the temporal dead zone on its own `let`s and aborted the
+    // whole module. Guarded so a failure here can never take the game down with it.
+    try {
+      buildLoadoutPanel();
+      syncLoadoutPanel();
+    } catch (e) {
+      console.warn("[loadout] panel init failed:", e);
+    }
