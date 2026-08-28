@@ -6019,6 +6019,9 @@
     }
 
     function trySelectWeapon(idx) {
+      // Peek the hotbar even when the slot is locked, so pressing a number always tells the
+      // player what is in that slot and whether they own it yet.
+      flashInvBar();
       if (weaponUnlocked[idx]) {
         setWeapon(idx);
       }
@@ -6104,9 +6107,38 @@
                 : CURRENT_MAP;
       // v91: HUD strings routed through tr() with English fallback baked in. Add a `hud*` key to
       // translation.js for each locale you want; missing keys harmlessly fall back to English.
-      const hudHelpMove   = tr("hudHelpMove",   "WASD move | Space jump | R reload");
-      const hudHelpAim    = tr("hudHelpAim",    "Mouse aim | RMB zoom | L flashlight | Z beam small/med/wide");
-      const hudHelpWeapons= tr("hudHelpWeapons","Weapons: <b>0</b> Knife | <b>1</b> Pistol | <b>2</b> Shotgun | <b>3</b> SMG | <b>4</b> AR | <b>5</b> AMR | <b>6</b> Dart | <b>7</b> Med Kit");
+      // Control lines are generated from the LIVE bindings and the LIVE hotbar order, so
+      // rebinding a key in Settings → Controls or dragging the hotbar around keeps the HUD
+      // honest instead of showing the stale hard-coded defaults it used to.
+      const K = (action) => `<b style="color:#8fd8ff;">${codeToLabel(kbCode(action))}</b>`;
+      const hudHelpMove = `${tr("hudLblMove", "Move")} ${K("moveForward")}${K("moveLeft")}${K("moveBack")}${K("moveRight")}` +
+        ` · ${tr("hudLblJump", "Jump")} ${K("jump")}` +
+        ` · ${tr("hudLblDash", "Dash")} ${K("dash")}`;
+      const hudHelpAim = `${tr("hudLblFire", "Fire")} <b style="color:#8fd8ff;">LMB</b>/${K("fire")}` +
+        ` · ${tr("hudLblAim", "Aim")} <b style="color:#8fd8ff;">RMB</b>/${K("aim")}` +
+        ` · ${tr("hudLblReload", "Reload")} ${K("reload")}` +
+        ` · ${tr("hudLblHeal", "Heal")} ${K("heal")}`;
+      const hudHelpGear = `${tr("hudLblGear", "Gear")}: ${K("speedNeedle")} ${tr("needleName", "Speed Needle")}` +
+        ` · ${K("jetHarness")} ${tr("jetName", "Jet Harness")} <span style="opacity:0.7;">(${tr("hudJetHint", "then dash to fly — mind the drop")})</span>`;
+      const hudHelpMisc = `${tr("hudLblLight", "Light")} ${K("flashlight")}` +
+        ` · ${tr("hudLblBeam", "Beam")} ${K("flashBeam")}` +
+        ` · ${tr("hudLblChat", "Chat")} ${K("chat")}` +
+        ` · ${tr("hudLblQuests", "Quests")} ${K("questHud")}` +
+        ` · ${tr("hudLblPause", "Pause")} <b style="color:#8fd8ff;">Esc</b>`;
+      const hudHelpWeapons = (() => {
+        const slotKeys = ["1", "2", "3", "4", "5", "6", "7", "0"];
+        const order = Array.isArray(gameSettings.weaponSlotOrder) ? gameSettings.weaponSlotOrder : [];
+        const parts = order.map((widx, i) => {
+          const owned = weaponUnlocked[widx];
+          const key = `<b style="color:${owned ? "#8fd8ff" : "#6b7280"};">${slotKeys[i] || "?"}</b>`;
+          const nm = owned
+            ? weaponDisplayName(widx)
+            : `<span style="color:#6b7280;">${weaponDisplayName(widx)} 🔒</span>`;
+          return `${key} ${nm}`;
+        });
+        if (DEV_GUN_UNLOCKED) parts.push(`<b style="color:#ffd700;">/</b> <span style="color:#ffd700;">～～～</span>`);
+        return `${tr("hudLblWeapons", "Weapons")}: ${parts.join(" · ")}`;
+      })();
       const hudMpTag      = tr("hudMpTag",      " (MP)");
       const hudMapLabel   = tr("hudMap",        "Map");
       const hudWeaponLbl  = tr("hudWeapon",     "Weapon");
@@ -6140,6 +6172,8 @@
         ${tr("hudGameTitleLine", "Zone No Light")}<br>
         ${hudHelpMove}<br>
         ${hudHelpAim}<br>
+        ${hudHelpGear}<br>
+        ${hudHelpMisc}<br>
         ${hudHelpWeapons}<br>
 ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         ${hudWeaponLbl}: ${weaponDisplayName(state.weaponIndex)}<br>
@@ -8342,11 +8376,31 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       });
     }
 
+    /**
+     * The hotbar is hidden during normal play and pops up from the bottom edge whenever the
+     * player switches (or tries to switch) weapons, then slides back down. `flashInvBar()`
+     * re-arms the visible window; updateInvBar() drives the slide every frame.
+     */
+    const INV_BAR_HOLD_MS = 2200;
+    let _invBarShowUntil = 0;
+    function flashInvBar() {
+      _invBarShowUntil = performance.now() + INV_BAR_HOLD_MS;
+    }
+
     function updateInvBar() {
       if (!_invBar) return;
       const inGame = gameWorldReady && menuEl && menuEl.style.display === "none";
+      // Kept in the layout (rather than display:none) while in-game so the slide can animate.
       _invBar.style.display = inGame ? "flex" : "none";
       if (!inGame) return;
+      const shown = performance.now() < _invBarShowUntil && player.health > 0;
+      // The element's own inline style already carries translateX(-50%) for centring, so the
+      // slide has to re-state it rather than replace it.
+      _invBar.style.transform = shown
+        ? "translateX(-50%) translateY(0)"
+        : "translateX(-50%) translateY(135%)";
+      _invBar.style.opacity = shown ? "1" : "0";
+      _invBar.style.pointerEvents = shown ? "auto" : "none";
       const curW = state.weaponIndex;
       _invSlotEls.forEach((div, i) => {
         const widx = parseInt(div.dataset.widx);
@@ -11568,6 +11622,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
     function setWeapon(index) {
       const prev = state.weaponIndex;
+      flashInvBar(); // slide the hotbar up so the new selection is visible
       state.weaponIndex = THREE.MathUtils.clamp(index | 0, 0, weaponModels.length - 1);
       state.ads = false;
       state.adsProgress = 0;
@@ -16151,7 +16206,6 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
             }, 4000);
           }
         }
-        if (gameWorldReady) updateDeathAnim(dt);
         if (gameWorldReady && MULTIPLAYER && ARENA_COOP && ZOMBIE_AUTHORITY) {
           _zombieSyncAcc += dt;
           if (_zombieSyncAcc >= 1 / 14) {
@@ -16197,6 +16251,13 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           camera.rotation.x = 0;
         }
       }
+
+      // Death fade + camera drift + revealing the DEFEAT panel. This used to live inside the
+      // `isArenaLikeMap || isBossArenaMap` block, so on any other map (training especially)
+      // nothing ever revealed deathUI: dying just froze you in place with no buttons and no
+      // way out but a reload. Nothing here is arena-specific — the function already returns
+      // immediately when alive or on a PvP map, where showDeathScreen shows the panel itself.
+      if (gameWorldReady) updateDeathAnim(dt);
 
       updateEffects(dt);
       tickFpsMeter(dt);
