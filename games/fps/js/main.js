@@ -4529,9 +4529,17 @@
       }
     }
 
+    /**
+     * Every decorative object the gauntlet adds straight to the scene. clearMap() only ever
+     * removed wallMeshes, so the glowing platform rims and the exit beacon survived the map
+     * change and hung in mid-air over the arena / PvP maps afterwards — the stray amber and
+     * cyan bars, which read exactly like platform edges that are not there.
+     */
+    const gauntletProps = [];
     function clearMap() {
       clearAllMazeChunks();
       clearPvpMapLights();
+      clearGauntletProps();
       while (wallMeshes.length) {
         const mesh = wallMeshes.pop();
         scene.remove(mesh);
@@ -5397,6 +5405,18 @@
         segs: [{t:"run",len:10},{t:"dash"},{t:"beam",len:18,w:2.4},{t:"room",len:24},{t:"crawl",len:10},{t:"room",len:32,boss:true},{t:"run",len:14}] },
     ];
 
+    function clearGauntletProps() {
+      while (gauntletProps.length) {
+        const o = gauntletProps.pop();
+        scene.remove(o);
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) {
+          const ms = Array.isArray(o.material) ? o.material : [o.material];
+          for (const m of ms) m.dispose();
+        }
+      }
+    }
+
     let gauntletLevel = 1;
     let gauntletCourse = null;   // { finishZ, finishX, length, checkpoints[], spots[], bossSpot }
     let gauntletState = {
@@ -5512,6 +5532,7 @@
 
     function buildMapGauntlet() {
       clearPvpMapLights();
+      clearGauntletProps();
       const spec = GAUNTLET_LEVELS[THREE.MathUtils.clamp(gauntletLevel, 1, GAUNTLET_LEVEL_COUNT) - 1];
       const FLOOR = 0x55606e, BEAM = 0x7a6a52, ROOM = 0x4d5a68, EXIT = 0x2f7d4f;
       const checkpoints = [];
@@ -5535,6 +5556,7 @@
           m.position.set(sx, topY + 0.04, sz);
           m.raycast = () => {};
           scene.add(m);
+          gauntletProps.push(m);
         };
         mk(w, t, x, z + d / 2 - t / 2);   // near end
         mk(w, t, x, z - d / 2 + t / 2);   // far end
@@ -5640,10 +5662,12 @@
       beacon.position.set(0, y + 7, finishZ);
       beacon.raycast = () => {};
       scene.add(beacon);
+      gauntletProps.push(beacon);
       const beaconLight = createPhysicalPointLight(0x62ffb0, 420, 40, 2.0);
       beaconLight.position.set(0, y + 4.5, finishZ);
       beaconLight.castShadow = false;
       scene.add(beaconLight);
+      pvpMapLights.push(beaconLight);
 
       // Lighting. Without this the course was pitch black — the map builders each own their
       // own lights and this one was only adding the exit beacon. A cool overhead key plus a
@@ -5897,7 +5921,10 @@
      */
     const STAMINA_MAX            = 100;
     const STAMINA_DASH_COST      = 34;    // → 2 dashes from full, 3rd needs a sliver of regen
-    const STAMINA_JET_DASH_COST  = 17;
+    // Jet dashes cost the SAME as ground dashes. They were half price, which meant putting
+    // the harness on doubled your dash count for its whole window — the harness is supposed
+    // to buy you VERTICAL movement, not more of it.
+    const STAMINA_JET_DASH_COST  = 34;
     const STAMINA_REGEN_PER_SEC  = 26;    // full refill ≈ 3.8 s
     const STAMINA_REGEN_DELAY_MS = 900;   // quiet time before the bar starts coming back
     const state = {
@@ -7888,7 +7915,11 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         thighMuscle.position.set(0, -0.18, 0.18); lr.add(thighMuscle);
 
         shinGrp.position.set(0, -0.48, 0);
-        shinGrp.rotation.x = -0.18;
+        // The model faces +Z (skull, face, toes are all at +z; the calf bulge is at -z).
+        // Rotating a child that hangs at -Y by +x swings it toward -Z, i.e. heel BACKWARD —
+        // which is how a knee actually bends. The old -0.18 swung the foot FORWARD, so the
+        // boss stood with both knees hyperextended: the "reverse-bow leg".
+        shinGrp.rotation.x = 0.10;
         const knee = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.14, 0.30), matSkinD);
         knee.position.set(0, 0.02, 0.02); shinGrp.add(knee);
         const shin = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.42, 0.30), matPants);
@@ -13525,9 +13556,19 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
      * Boxes fit a box-built model exactly, so they simply do not have this failure mode.
      * Extents below are read off the mesh positions in makeHormoneZombie().
      */
-    const BOSS_HIT_BOXES = [
-      // skull + jaw + brow + nose + ears, headGroup at (0, 1.96, 0.50)
-      { x0: -0.32, x1: 0.32, y0: 1.60, y1: 2.24, z0: 0.22, z1: 0.82, zone: "head" },
+    /** Children of root: the legs. Tested in root space. */
+    const BOSS_LEG_BOXES = [
+      { x0: 0.08, x1: 0.52, y0: -0.38, y1: 0.70, z0: -0.55, z1: 0.55, zone: "leg" },
+      { x0: -0.52, x1: -0.08, y0: -0.38, y1: 0.70, z0: -0.55, z1: 0.55, zone: "leg" },
+    ];
+    /** Children of torsoRoot: head, trunk, arms. Tested in TORSO space so they follow the hunch. */
+    const BOSS_TORSO_BOXES = [
+      // skull + brow + nose + ears, headGroup at (0, 1.96, 0.50).
+      // Lower bound is the SKULL floor (1.72), not the jaw (1.63): the head is hunched
+      // forward over the chest, so a jaw-height box hangs in front of the upper torso and
+      // a level shot aimed at the middle of the chest clips it on the way in and scores a
+      // headshot. Trimming to the skull keeps chest shots as body hits.
+      { x0: -0.32, x1: 0.32, y0: 1.72, y1: 2.24, z0: 0.22, z1: 0.82, zone: "head" },
       // Torso is split at the waist. One box for the whole trunk had to be as deep as the
       // chest (z 0.62), which left ~0.8 world units of air in front of the much thinner
       // belly still reading as a body hit.
@@ -13536,14 +13577,10 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       // arms hang wide off the shoulders at x ±0.80
       { x0: 0.55, x1: 1.30, y0: 0.75, y1: 2.05, z0: -0.35, z1: 0.50, zone: "body" },
       { x0: -1.30, x1: -0.55, y0: 0.75, y1: 2.05, z0: -0.35, z1: 0.50, zone: "body" },
-      // thigh + shin + foot; z is widened to cover the swing, since zones stay fixed in
-      // root space by design (so torso sway cannot drag the hitboxes around).
-      { x0: 0.08, x1: 0.52, y0: -0.38, y1: 0.70, z0: -0.55, z1: 0.55, zone: "leg" },
-      { x0: -0.52, x1: -0.08, y0: -0.38, y1: 0.70, z0: -0.55, z1: 0.55, zone: "leg" },
     ];
 
     /** Head / torso / leg spheres in humanoid root space (zombies + remote PvP avatars). */
-    function humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, pad = 1) {
+    function humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, pad = 1, torsoGroup = null) {
       rootGroup.updateMatrixWorld(true);
       _invEnemyMat.copy(rootGroup.matrixWorld).invert();
       _ehLo.copy(raycaster.ray.origin).applyMatrix4(_invEnemyMat);
@@ -13551,15 +13588,42 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       let bestLocalT = Infinity;
       let zone = null;
       if (isBossEnemy) {
-        for (let vi = 0; vi < BOSS_HIT_BOXES.length; vi++) {
-          const b = BOSS_HIT_BOXES[vi];
+        // Legs hang off the ROOT, so they are tested in root space.
+        for (let vi = 0; vi < BOSS_LEG_BOXES.length; vi++) {
+          const b = BOSS_LEG_BOXES[vi];
           const t = rayBoxParam(_ehLo.x, _ehLo.y, _ehLo.z, _ehLd.x, _ehLd.y, _ehLd.z, b, pad);
-          if (t !== null && t < bestLocalT) {
-            bestLocalT = t;
-            zone = b.zone;
-          }
+          if (t !== null && t < bestLocalT) { bestLocalT = t; zone = b.zone; }
         }
-      } else {
+        // Head / chest / arms are children of torsoRoot, which carries the 0.18 rad HUNCH
+        // (plus lean and bob). Tested in ROOT space they were badly out of place: the hunch
+        // swings the head from (y 1.96, z 0.50) to (y 1.84, z 0.84) — 0.34 root units, i.e.
+        // 0.68 WORLD units forward at the boss's 2.0 scale, which put the real head outside
+        // the head box entirely. The old oversized spheres hid this by covering it anyway.
+        // Testing in torso space makes the zones follow the pose exactly.
+        const tg = torsoGroup || rootGroup;
+        if (tg !== rootGroup) {
+          tg.updateMatrixWorld(true);
+          _invEnemyMat.copy(tg.matrixWorld).invert();
+          _ehLo.copy(raycaster.ray.origin).applyMatrix4(_invEnemyMat);
+          _ehLd.copy(raycaster.ray.direction).transformDirection(_invEnemyMat).normalize();
+        }
+        for (let vi = 0; vi < BOSS_TORSO_BOXES.length; vi++) {
+          const b = BOSS_TORSO_BOXES[vi];
+          const t = rayBoxParam(_ehLo.x, _ehLo.y, _ehLo.z, _ehLd.x, _ehLd.y, _ehLd.z, b, pad);
+          // Local t is a distance in the same units for both spaces (uniform scale), so the
+          // nearest-wins comparison across the two spaces is valid.
+          if (t !== null && t < bestLocalT) { bestLocalT = t; zone = b.zone; }
+        }
+        if (zone === null) return null;
+        // Re-derive the world point from whichever space produced the winner.
+        _ehHitWorld.copy(_ehLd).multiplyScalar(bestLocalT).add(_ehLo);
+        _ehHitWorld.applyMatrix4(tg !== rootGroup ? tg.matrixWorld : rootGroup.matrixWorld);
+        const wT = _ehHitWorld.distanceTo(raycaster.ray.origin);
+        const mT = (typeof raycaster.far === "number" && raycaster.far > 0) ? raycaster.far : Infinity;
+        if (wT < -0.02 || wT > mT + 0.04) return null;
+        return { t: wT, zone, point: _ehHitWorld.clone() };
+      }
+      {
         const volumes = [
           { cx: 0, cy: 1.82, cz: 0, r: 0.3, zone: "head" },
           { cx: 0, cy: 1.12, cz: 0, r: 0.52, zone: "body" },
@@ -13588,7 +13652,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
     /** Hit volumes are fixed in zombie root space so torso sway does not move hitboxes. */
     function enemyHitAlongRay(raycaster, enemy) {
-      return humanoidHitAlongRay(raycaster, enemy.group, !!enemy.isBoss);
+      return humanoidHitAlongRay(raycaster, enemy.group, !!enemy.isBoss, 1, enemy.torsoRoot || null);
     }
 
     function applyDamage(enemy, zone, w) {
@@ -14455,10 +14519,10 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       p.mesh = null;
     }
 
-    function humanoidHitAlongRayPadded(raycaster, rootGroup, pad, isBossEnemy) {
-      const hit = humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy);
+    function humanoidHitAlongRayPadded(raycaster, rootGroup, pad, isBossEnemy, torsoGroup = null) {
+      const hit = humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, 1, torsoGroup);
       if (hit || pad <= 1.001) return hit;
-      return humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, pad);
+      return humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, pad, torsoGroup);
     }
 
     function probeParalysisDartProximityHit(worldPos, hitPad, slowDuration, muzzleOpt) {
@@ -17242,7 +17306,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
             enemy.torsoRoot.rotation.z = Math.sin(w) * (sprinting ? 0.10 : 0.07);
           }
           const LEG_BASE_TILT = 0.0;
-          const SHIN_BASE_BEND = -0.18;
+          const SHIN_BASE_BEND = 0.10;   // was -0.18 — hyperextended the knee backwards
           const isSprinting = !!enemy._bossSprinting;
           const legSwingAmp = isSprinting ? 0.75 : 0.50;
           const shinKickAmp = isSprinting ? 0.65 : 0.45;
