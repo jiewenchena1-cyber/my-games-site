@@ -1729,7 +1729,7 @@
       drawEnemyHp(enemy);
       if (enemy.hp <= 0 && enemy.alive) {
         enemy.alive = false;
-        enemy.respawnTimer = 3.0;
+        enemy.respawnTimer = zombieRespawnDelay();
         enemy.dissolveTimer = DISSOLVE_DURATION + 0.12;
         const hitPt = new THREE.Vector3(
           enemy.group.position.x,
@@ -2778,6 +2778,10 @@
       if (isTrainingMap(CURRENT_MAP)) return { fog: 0x9db4cc, bg: 0x6fa8dc };
       if (isBrightIndoorMap(CURRENT_MAP)) return { fog: 0x8ea6c6, bg: 0xa9c3e6 };
       if (isBossArenaMap(CURRENT_MAP)) return { fog: 0x1a1a22, bg: 0x1a1a22 };
+      // The gauntlet is a platforming course: with the stock near-black fog the next
+      // platform edge simply is not visible, which turns every gap into a guess. Slate
+      // instead of black keeps the mood without hiding the thing you have to jump to.
+      if (isGauntletMap(CURRENT_MAP)) return { fog: 0x2b3542, bg: 0x18202b };
       return { fog: 0x070504, bg: 0x070504 };
     }
 
@@ -4926,6 +4930,15 @@
       dummy._hpBarRatio = -1;
       dummy.group.rotation.y = 0;
       dummy.group.visible = true;
+      // The enemy AI used to pose these every frame; now that it correctly leaves training
+      // targets alone, give them their resting pose once, here.
+      if (spec.kind === "boss" && dummy.torsoRoot) {
+        dummy.torsoRoot.rotation.x = 0.18;                       // HUNCH
+        if (dummy.leftArmRoot)  { dummy.leftArmRoot.rotation.z = -0.42; dummy.leftArmRoot.rotation.y = 0.25; }
+        if (dummy.rightArmRoot) { dummy.rightArmRoot.rotation.z = 0.42; dummy.rightArmRoot.rotation.y = -0.25; }
+        if (dummy.leftForearmRoot)  dummy.leftForearmRoot.rotation.x = -0.55;   // ELBOW_REST
+        if (dummy.rightForearmRoot) dummy.rightForearmRoot.rotation.x = -0.55;
+      }
       drawEnemyHp(dummy);
       return dummy;
     }
@@ -5139,6 +5152,30 @@
       spawnAnimationShowcase();
     }
 
+    /**
+     * Walk cycle for training targets. Lives here because updateEnemies() no longer touches
+     * them — without this, a patrolling target would slide down its lane with frozen legs.
+     * Handles both limb layouts: zombie targets expose *LegRoot / *ArmRoot, recruit targets
+     * are player avatars and expose leftLeg / rightLeg / leftArm / rightArm.
+     */
+    function animateTrainingDummyLimbs(enemy, dt, moving) {
+      if (enemy.isBoss) return;   // the boss target holds the static pose set at build time
+      const sw = moving ? Math.sin(enemy.walkPhase * 2.0) : 0;
+      const legAmp = 0.55, armAmp = 0.35;
+      const legL = enemy.leftLegRoot || enemy.leftLeg;
+      const legR = enemy.rightLegRoot || enemy.rightLeg;
+      const armL = enemy.leftArmRoot || enemy.leftArm;
+      const armR = enemy.rightArmRoot || enemy.rightArm;
+      if (legL) legL.rotation.x = dampScalar(legL.rotation.x, -sw * legAmp, dt, 14);
+      if (legR) legR.rotation.x = dampScalar(legR.rotation.x, sw * legAmp, dt, 14);
+      // Zombie arms hang forward when aware; a dummy is never aware, so rest them low and
+      // let them swing opposite the legs.
+      if (armL) armL.rotation.x = dampScalar(armL.rotation.x, -0.2 + sw * armAmp, dt, 14);
+      if (armR) armR.rotation.x = dampScalar(armR.rotation.x, -0.2 - sw * armAmp, dt, 14);
+      if (enemy.leftKnee)  enemy.leftKnee.rotation.x  = dampScalar(enemy.leftKnee.rotation.x,  Math.max(0, -sw) * 0.7, dt, 14);
+      if (enemy.rightKnee) enemy.rightKnee.rotation.x = dampScalar(enemy.rightKnee.rotation.x, Math.max(0, sw) * 0.7, dt, 14);
+    }
+
     function updateTrainingDummies(dt) {
       if (!isTrainingMap(CURRENT_MAP) || !gameWorldReady) return;
       for (const enemy of state.enemies) {
@@ -5167,6 +5204,7 @@
 
         if (!enemy.lane) {
           // Static target: just a slow idle sway so it doesn't look frozen.
+          animateTrainingDummyLimbs(enemy, dt, false);
           enemy.walkPhase += dt * 1.1;
           enemy.group.position.y = enemy.baseY + Math.sin(enemy.walkPhase) * 0.02;
           enemy.group.rotation.y = 0;
@@ -5174,6 +5212,7 @@
         }
 
         const lane = enemy.lane;
+        animateTrainingDummyLimbs(enemy, dt, true);
         let x = enemy.group.position.x + enemy.patrolDir * enemy.patrolSpeed * dt;
         if (x >= lane.xMax) {
           x = lane.xMax;
@@ -5287,6 +5326,364 @@
       return "arena";
     }
 
+
+    /* ══════════════════════════════════════════════════════════════════════
+     * GAUNTLET — 20-level movement course
+     *
+     * Deliberately NOT the boss mode. There is no clear condition tied to killing
+     * anything: the only objective is to reach the exit pad. Zombies and the boss are
+     * pressure, not a checklist — you may sprint straight past every one of them.
+     *
+     *   Levels  1–5   pure movement (jump / dash / crouch / narrow beams)
+     *   Levels  6–15  zombies layered on top of the movement
+     *   Levels 16–20  zombies + Hormone Zombie boss
+     *   Level  20     the boss is the HELL Hormone Zombie
+     *
+     * The course is built from segments laid end to end down -Z. Everything outside a
+     * platform is void: falling off resets you to the last checkpoint, not to the menu.
+     * ═════════════════════════════════════════════════════════════════════ */
+    function isGauntletMap(m) { return m === "gauntlet"; }
+
+    const GAUNTLET_LEVEL_COUNT = 20;
+    /** Eye Y below which you are considered fallen. Platform tops sit at 0 and up. */
+    const GAUNTLET_VOID_Y = -6;
+    /** The implicit "floor everywhere" is pushed far under the course so pits are real. */
+    const GAUNTLET_FLOOR_EYE_Y = -40;
+    const GAUNTLET_W = 12;            // standard corridor width
+    const GAUNTLET_PROGRESS_KEY = "fps_gauntlet_progress";
+
+    /** Jump clears ~5.4u (speed 6.5, 0.83s hang). Dash covers 8.0u. Gaps are sized off that. */
+    const GAP_JUMP = 4.2;   // comfortably jumpable
+    const GAP_DASH = 7.0;   // not jumpable — dash only
+    const CRAWL_CLEAR = 1.30; // slab underside: blocks a 1.65 standing eye, passes 1.03 crouched
+
+    /**
+     * Segment vocabulary:
+     *   run    {len, w}          flat platform
+     *   jump   {gap}             jumpable pit
+     *   dash   {gap}             dash-only pit
+     *   crawl  {len}             platform under a low slab — must crouch
+     *   beam   {len, w}          narrow platform over the void
+     *   steps  {n, rise, len}    ascending pads
+     *   pads   {n, len, gap, w}  islands separated by pits
+     *   room   {len, w, spots}   open arena; `spots` zombie spawn points
+     */
+    const GAUNTLET_LEVELS = [
+      // ── 1–5: movement only ──────────────────────────────────────────────
+      { name: "FIRST STEPS",  segs: [{t:"run",len:16},{t:"jump"},{t:"run",len:12},{t:"jump"},{t:"run",len:14}] },
+      { name: "THE GAP",      segs: [{t:"run",len:12},{t:"jump"},{t:"run",len:8},{t:"dash"},{t:"run",len:14}] },
+      { name: "DUCK",         segs: [{t:"run",len:10},{t:"crawl",len:10},{t:"jump"},{t:"crawl",len:8},{t:"run",len:12}] },
+      { name: "NARROW",       segs: [{t:"run",len:10},{t:"beam",len:18,w:2.4},{t:"jump"},{t:"beam",len:14,w:2.0},{t:"run",len:12}] },
+      { name: "STAIRWAY",     segs: [{t:"run",len:10},{t:"steps",n:4,rise:1.6,len:4},{t:"dash"},{t:"pads",n:3,len:3.5,gap:GAP_JUMP,w:4},{t:"run",len:12}] },
+
+      // ── 6–15: zombies + movement ────────────────────────────────────────
+      { name: "WELCOMING PARTY", z:4,  segs: [{t:"run",len:10},{t:"room",len:22},{t:"jump"},{t:"run",len:14}] },
+      { name: "CROSSING",        z:5,  segs: [{t:"run",len:10},{t:"room",len:18},{t:"dash"},{t:"beam",len:16,w:2.6},{t:"run",len:12}] },
+      { name: "LOW ROADS",       z:6,  segs: [{t:"run",len:10},{t:"crawl",len:12},{t:"room",len:18},{t:"crawl",len:10},{t:"run",len:12}] },
+      { name: "STEPPING OUT",    z:7,  segs: [{t:"run",len:10},{t:"pads",n:4,len:3.5,gap:GAP_JUMP,w:4},{t:"room",len:20},{t:"dash"},{t:"run",len:12}] },
+      { name: "THE LONG DROP",   z:8,  segs: [{t:"run",len:10},{t:"dash"},{t:"beam",len:20,w:2.2},{t:"dash"},{t:"room",len:20},{t:"run",len:12}] },
+      { name: "SWARM",           z:10, segs: [{t:"run",len:10},{t:"room",len:26},{t:"crawl",len:10},{t:"room",len:18},{t:"run",len:12}] },
+      { name: "HIGH GROUND",     z:10, segs: [{t:"run",len:10},{t:"steps",n:4,rise:1.7,len:4},{t:"beam",len:14,w:2.6},{t:"steps",n:4,rise:-1.7,len:4},{t:"room",len:20},{t:"dash"},{t:"run",len:12}] },
+      { name: "PINCH",           z:11, segs: [{t:"run",len:10},{t:"beam",len:16,w:2.0},{t:"room",len:22},{t:"beam",len:16,w:2.0},{t:"run",len:12}] },
+      { name: "NO FLOOR",        z:12, segs: [{t:"run",len:10},{t:"pads",n:5,len:3.2,gap:GAP_JUMP,w:3.6},{t:"room",len:22},{t:"dash"},{t:"pads",n:3,len:3.2,gap:GAP_JUMP,w:3.6},{t:"run",len:12}] },
+      { name: "GRINDER",         z:14, segs: [{t:"run",len:10},{t:"room",len:22},{t:"crawl",len:12},{t:"dash"},{t:"room",len:22},{t:"beam",len:14,w:2.4},{t:"run",len:12}] },
+
+      // ── 16–20: zombies + boss ───────────────────────────────────────────
+      { name: "HORMONE",         z:8,  boss:1, segs: [{t:"run",len:10},{t:"room",len:20},{t:"dash"},{t:"room",len:28,boss:true},{t:"run",len:14}] },
+      { name: "BOSS + BEAMS",    z:9,  boss:1, segs: [{t:"run",len:10},{t:"beam",len:18,w:2.6},{t:"room",len:28,boss:true},{t:"dash"},{t:"run",len:14}] },
+      { name: "CRAWLSPACE",      z:10, boss:1, segs: [{t:"run",len:10},{t:"crawl",len:12},{t:"room",len:28,boss:true},{t:"crawl",len:12},{t:"run",len:14}] },
+      { name: "THE CLIMB",       z:12, boss:1, segs: [{t:"run",len:10},{t:"steps",n:4,rise:1.7,len:4},{t:"beam",len:14,w:2.6},{t:"steps",n:4,rise:-1.7,len:4},{t:"room",len:28,boss:true},{t:"dash"},{t:"pads",n:3,len:3.4,gap:GAP_JUMP,w:4},{t:"run",len:14}] },
+      { name: "HELL",            z:14, boss:1, hell:true,
+        segs: [{t:"run",len:10},{t:"dash"},{t:"beam",len:18,w:2.4},{t:"room",len:24},{t:"crawl",len:10},{t:"room",len:32,boss:true},{t:"run",len:14}] },
+    ];
+
+    let gauntletLevel = 1;
+    let gauntletCourse = null;   // { finishZ, finishX, length, checkpoints[], spots[], bossSpot }
+    let gauntletState = {
+      cleared: false, deaths: 0, startMs: 0, checkpointIdx: 0, finishedMs: 0,
+    };
+
+    function gauntletProgress() {
+      const n = parseInt(localStorage.getItem(GAUNTLET_PROGRESS_KEY) || "0", 10);
+      return Number.isFinite(n) ? THREE.MathUtils.clamp(n, 0, GAUNTLET_LEVEL_COUNT) : 0;
+    }
+    function saveGauntletProgress(level) {
+      if (level > gauntletProgress()) {
+        try { localStorage.setItem(GAUNTLET_PROGRESS_KEY, String(level)); } catch (_) {}
+      }
+    }
+
+    function gauntletRespawnAtCheckpoint() {
+      if (!gauntletCourse) return;
+      const cp = gauntletCourse.checkpoints[gauntletState.checkpointIdx]
+        || gauntletCourse.checkpoints[0];
+      if (!cp) return;
+      player.position.set(cp.x, cp.y, cp.z);
+      player.velocityY = 0;
+      player.onGround = true;
+      state.dashActiveUntil = 0;
+      state.dashRemainingDist = 0;
+      camera.position.copy(player.position);
+    }
+
+    function updateGauntlet(dt) {
+      if (!isGauntletMap(CURRENT_MAP) || !gauntletCourse || !gameWorldReady) return;
+      if (player.health <= 0) return;
+
+      // Advance the checkpoint as you pass each platform. -Z is forward, so "passed" means
+      // the player's z has dropped below the marker's.
+      const cps = gauntletCourse.checkpoints;
+      while (
+        gauntletState.checkpointIdx + 1 < cps.length &&
+        player.position.z <= cps[gauntletState.checkpointIdx + 1].z
+      ) gauntletState.checkpointIdx++;
+
+      // Fell off the course. Not a death — the run continues from the last checkpoint,
+      // which is what keeps a 20-level movement mode playable instead of infuriating.
+      if (player.position.y < GAUNTLET_VOID_Y) {
+        gauntletState.deaths++;
+        damagePlayer(12, null);
+        if (player.health > 0) {
+          gauntletRespawnAtCheckpoint();
+          showCombatFeedback(tr("gauntletFell", "FELL — BACK TO CHECKPOINT"), "#ffb21f", 0.6);
+        }
+        return;
+      }
+
+      if (gauntletState.cleared) return;
+      const dx = player.position.x - gauntletCourse.finishX;
+      const dz = player.position.z - gauntletCourse.finishZ;
+      if (dx * dx + dz * dz < 5.5 * 5.5) {
+        gauntletState.cleared = true;
+        gauntletState.finishedMs = performance.now();
+        saveGauntletProgress(gauntletLevel);
+        showGauntletClear();
+      }
+    }
+
+    let _gClearEl = null;
+    function showGauntletClear() {
+      if (!_gClearEl) {
+        const el = document.createElement("div");
+        el.id = "gauntletClear";
+        el.style.cssText =
+          "position:fixed;inset:0;z-index:120;display:none;flex-direction:column;" +
+          "align-items:center;justify-content:center;gap:14px;background:rgba(4,8,12,0.82);" +
+          "font-family:var(--game-font-ui);color:#dff6ff;text-align:center;";
+        el.innerHTML =
+          '<div id="gClearTitle" style="font-size:38px;letter-spacing:4px;color:#62ffb0;text-shadow:0 2px 18px rgba(60,255,170,0.5);"></div>' +
+          '<div id="gClearSub" style="font-size:15px;opacity:0.85;letter-spacing:1px;"></div>' +
+          '<div style="display:flex;gap:10px;margin-top:10px;">' +
+          '<button type="button" id="gClearNext" class="btn-texture btn-primary" style="min-width:150px;padding:10px 18px;"></button>' +
+          '<button type="button" id="gClearRetry" class="btn-texture" style="min-width:120px;padding:10px 18px;"></button>' +
+          '<button type="button" id="gClearMenu" class="btn-texture" style="min-width:120px;padding:10px 18px;"></button>' +
+          "</div>";
+        document.body.appendChild(el);
+        el.querySelector("#gClearNext").addEventListener("click", () => {
+          _gClearEl.style.display = "none";
+          startGauntletLevel(Math.min(GAUNTLET_LEVEL_COUNT, gauntletLevel + 1));
+        });
+        el.querySelector("#gClearRetry").addEventListener("click", () => {
+          _gClearEl.style.display = "none";
+          startGauntletLevel(gauntletLevel);
+        });
+        el.querySelector("#gClearMenu").addEventListener("click", () => {
+          _gClearEl.style.display = "none";
+          goToMenu();
+        });
+        _gClearEl = el;
+      }
+      const secs = ((gauntletState.finishedMs - gauntletState.startMs) / 1000).toFixed(1);
+      const last = gauntletLevel >= GAUNTLET_LEVEL_COUNT;
+      _gClearEl.querySelector("#gClearTitle").textContent = last
+        ? tr("gauntletAllClear", "GAUNTLET COMPLETE")
+        : tr("gauntletClear", "LEVEL {n} CLEAR").replace("{n}", String(gauntletLevel));
+      _gClearEl.querySelector("#gClearSub").textContent =
+        tr("gauntletTime", "Time") + " " + secs + "s  ·  " +
+        tr("gauntletFalls", "Falls") + " " + gauntletState.deaths;
+      const nextBtn = _gClearEl.querySelector("#gClearNext");
+      nextBtn.textContent = tr("gauntletNext", "NEXT LEVEL");
+      nextBtn.style.display = last ? "none" : "";
+      _gClearEl.querySelector("#gClearRetry").textContent = tr("gauntletRetry", "RETRY");
+      _gClearEl.querySelector("#gClearMenu").textContent = tr("gauntletMenu", "MENU");
+      _gClearEl.style.display = "flex";
+      try { document.exitPointerLock(); } catch (_) {}
+    }
+
+    function buildMapGauntlet() {
+      clearPvpMapLights();
+      const spec = GAUNTLET_LEVELS[THREE.MathUtils.clamp(gauntletLevel, 1, GAUNTLET_LEVEL_COUNT) - 1];
+      const FLOOR = 0x55606e, BEAM = 0x7a6a52, ROOM = 0x4d5a68, EXIT = 0x2f7d4f;
+      const checkpoints = [];
+      const spots = [];
+      let bossSpot = null;
+      let cz = 6;      // leading edge; the start pad hangs off +Z of it
+      let y = 0;       // current platform top
+
+      /**
+       * Glowing rim around every platform. On a dark map you cannot judge a jump you
+       * cannot see the edge of — lighting alone was not enough, and guessing where the
+       * floor ends is not the kind of difficulty this mode is for. Unlit basic material,
+       * so it stays readable at any distance and through fog. Purely decorative: never
+       * added to wallBoxes, so it has no collision.
+       */
+      const rim = (w, d, x, z, topY, color) => {
+        const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, fog: false });
+        const t = 0.22;
+        const mk = (sw, sd, sx, sz) => {
+          const m = new THREE.Mesh(new THREE.BoxGeometry(sw, 0.06, sd), mat);
+          m.position.set(sx, topY + 0.04, sz);
+          m.raycast = () => {};
+          scene.add(m);
+        };
+        mk(w, t, x, z + d / 2 - t / 2);   // near end
+        mk(w, t, x, z - d / 2 + t / 2);   // far end
+        mk(t, d, x - w / 2 + t / 2, z);   // left
+        mk(t, d, x + w / 2 - t / 2, z);   // right
+      };
+      const plat = (len, w, topY, color, rimColor) => {
+        const m = addWallBox(w, 4, len, 0, topY - 2, cz - len / 2, color);
+        if (m.userData.wallBox) m.userData.wallBox.wideTop = true;
+        rim(w, len, 0, cz - len / 2, topY, rimColor || 0x3fa7d6);
+        cz -= len;
+      };
+      const rails = (len, w, topY) => {
+        // Waist-high kerbs so a "run" segment reads as a corridor and you don't walk off
+        // sideways by accident. Beams and pads deliberately get none.
+        addWallBox(0.5, 1.1, len, w / 2 + 0.25, topY + 0.55, cz + len / 2, color_kerb);
+        addWallBox(0.5, 1.1, len, -w / 2 - 0.25, topY + 0.55, cz + len / 2, color_kerb);
+      };
+      const color_kerb = 0x3d4652;
+      /**
+       * Zombie-only fence. enemyCollidesWall() samples a sphere at y=1.0, while the floor
+       * platforms top out at y=0 — so nothing stopped a zombie from strolling straight out
+       * over a pit and hovering in mid-air. These invisible slabs sit in exactly that
+       * sampled band at every pit edge. They are flagged enemyOnly so the player's own
+       * collision ignores them completely and can still jump/dash the gap.
+       */
+      const fence = (topY) => {
+        const m = addWallBox(GAUNTLET_W + 8, 1.6, 0.5, 0, topY + 0.8, cz, color_kerb);
+        m.visible = false;
+        if (m.userData.wallBox) m.userData.wallBox.enemyOnly = true;
+      };
+      const pit = (len, topY) => { fence(topY); cz -= len; fence(topY); };
+      const RIM_EDGE = 0xffa53a;   // amber: the floor ends here
+      const RIM_SIDE = 0x3fa7d6;   // cyan: ordinary platform
+      const RIM_EXIT = 0x54ffa0;
+      const mark = () => checkpoints.push({ x: 0, y: y + 1.65, z: cz + 2.5 });
+
+      // Start pad
+      plat(12, GAUNTLET_W + 4, y, FLOOR);
+      mark();
+
+      for (const sg of spec.segs) {
+        if (sg.t === "run") {
+          plat(sg.len, sg.w || GAUNTLET_W, y, FLOOR, RIM_EDGE);
+          rails(sg.len, sg.w || GAUNTLET_W, y);
+          mark();
+        } else if (sg.t === "jump") {
+          pit(sg.gap || GAP_JUMP, y);
+        } else if (sg.t === "dash") {
+          pit(sg.gap || GAP_DASH, y);
+        } else if (sg.t === "crawl") {
+          const w = sg.w || GAUNTLET_W;
+          plat(sg.len, w, y, FLOOR);
+          // Slab underside at y + CRAWL_CLEAR — too low to walk under, fine to crouch under.
+          addWallBox(w, 3.0, sg.len, 0, y + CRAWL_CLEAR + 1.5, cz + sg.len / 2, 0x6b5b4a);
+          mark();
+        } else if (sg.t === "beam") {
+          plat(sg.len, sg.w || 2.4, y, BEAM, RIM_EDGE);
+          mark();
+        } else if (sg.t === "steps") {
+          for (let i = 0; i < sg.n; i++) {
+            y += sg.rise;
+            plat(sg.len, sg.w || 6, y, FLOOR, RIM_SIDE);
+          }
+          mark();
+        } else if (sg.t === "pads") {
+          for (let i = 0; i < sg.n; i++) {
+            plat(sg.len, sg.w || 4, y, BEAM, RIM_EDGE);
+            if (i < sg.n - 1) pit(sg.gap || GAP_JUMP, y);
+          }
+          mark();
+        } else if (sg.t === "room") {
+          const w = sg.w || (GAUNTLET_W + 10);
+          const zEnd = cz - sg.len;
+          plat(sg.len, w, y, ROOM, RIM_SIDE);
+          rails(sg.len, w, y);
+          // Spawn points spread across the room floor, inset from the edges.
+          const cols = 3, rows = Math.max(2, Math.round(sg.len / 8));
+          for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+              spots.push({
+                x: (c - (cols - 1) / 2) * (w * 0.30),
+                z: cz + sg.len * ((r + 0.5) / rows),
+                y,
+              });
+            }
+          }
+          if (sg.boss) bossSpot = { x: 0, z: zEnd + sg.len * 0.35, y };
+          mark();
+        }
+      }
+
+      // Exit pad — visually distinct, plus a beacon column so it reads from a distance.
+      const finishLen = 14;
+      const finishZ = cz - finishLen / 2;
+      plat(finishLen, GAUNTLET_W + 4, y, EXIT, RIM_EXIT);
+      const beacon = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.6, 1.6, 14, 20, 1, true),
+        new THREE.MeshBasicMaterial({
+          color: 0x54ffa0, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false,
+        })
+      );
+      beacon.position.set(0, y + 7, finishZ);
+      beacon.raycast = () => {};
+      scene.add(beacon);
+      const beaconLight = createPhysicalPointLight(0x62ffb0, 420, 40, 2.0);
+      beaconLight.position.set(0, y + 4.5, finishZ);
+      beaconLight.castShadow = false;
+      scene.add(beaconLight);
+
+      // Lighting. Without this the course was pitch black — the map builders each own their
+      // own lights and this one was only adding the exit beacon. A cool overhead key plus a
+      // run of lamps down the course, so you can actually see the next platform edge.
+      const amb = new THREE.AmbientLight(0xc4d6ea, 3.4);
+      scene.add(amb); pvpMapLights.push(amb);
+      const hemi = new THREE.HemisphereLight(0xdae8ff, 0x39424f, 5.6);
+      scene.add(hemi); pvpMapLights.push(hemi);
+      const key = new THREE.DirectionalLight(0xeaf2ff, 11.0);
+      key.position.set(18, 48, 20); key.castShadow = false;
+      scene.add(key); pvpMapLights.push(key);
+      const fill = new THREE.DirectionalLight(0xbcd4f2, 4.0);
+      fill.position.set(-22, 30, -40); fill.castShadow = false;
+      scene.add(fill); pvpMapLights.push(fill);
+      for (let lz = 4; lz > finishZ - 8; lz -= 15) {
+        const lamp = createPhysicalPointLight(0xbfd8ff, 680, 42, 2.0);
+        lamp.position.set(0, 8.0, lz);
+        lamp.castShadow = false;
+        scene.add(lamp); pvpMapLights.push(lamp);
+      }
+
+      gauntletCourse = {
+        finishX: 0, finishZ, finishY: y, length: Math.abs(finishZ),
+        checkpoints, spots, bossSpot, spec,
+      };
+      gauntletState = { cleared: false, deaths: 0, startMs: performance.now(), checkpointIdx: 0, finishedMs: 0 };
+
+      // bootGame calls positionPlayerForCurrentMap() BEFORE the map builder runs, so the
+      // course did not exist yet and the player got the fallback spot. Place them properly
+      // now that the start pad is real.
+      const cp0 = checkpoints[0];
+      if (cp0) {
+        player.position.set(cp0.x, cp0.y, cp0.z);
+        player.velocityY = 0;
+        player.onGround = true;
+        player.yaw = 0;
+        camera.position.copy(player.position);
+      }
+    }
+
     const MAP_BUILDERS = {
       arena: buildMapArena,
       boss_arena: buildMapBossArena,
@@ -5294,6 +5691,7 @@
       crossfire_grid: buildMapCrossfireGrid,
       pvp_bright: buildMapPvpBright,
       training: buildMapTraining,
+      gauntlet: buildMapGauntlet,
     };
 
     const ZOMBIE_COUNT = 18;
@@ -5332,7 +5730,58 @@
       return positions;
     }
 
+    /**
+     * Spawn placement helpers.
+     *
+     * The old picker drew a uniformly random angle every time, which clumps badly: with 18
+     * zombies you routinely got 6 in one quadrant and an empty half-map behind you. These
+     * three fix the three separate failure modes.
+     */
+    let _spawnSectorCursor = 0;
+    const SPAWN_SECTORS = 8;
+    /** Next angle from a round-robin sector, jittered inside the sector so it isn't a grid. */
+    function nextSpawnAngle(rnd) {
+      const sector = _spawnSectorCursor++ % SPAWN_SECTORS;
+      const width = (Math.PI * 2) / SPAWN_SECTORS;
+      return sector * width + rnd() * width;
+    }
+    /** Cycle near/mid/far so a wave doesn't arrive as one solid wall at one radius. */
+    function spawnBandScale(rnd) {
+      const band = _spawnSectorCursor % 3;
+      const base = band === 0 ? 1.0 : band === 1 ? 1.55 : 2.2;
+      return base + rnd() * 0.35;
+    }
+    /**
+     * True if (x,z) sits inside the player's forward view cone. Spawning there is what makes
+     * zombies "pop in" out of nowhere in plain sight; we retry a few times to land behind or
+     * beside the player instead, then give up rather than fail to spawn at all.
+     */
+    function inPlayerViewCone(x, z, halfAngle = 0.62) {
+      const dx = x - player.position.x;
+      const dz = z - player.position.z;
+      const len = Math.hypot(dx, dz);
+      if (len < 1e-3) return true;
+      const fx = -Math.sin(player.yaw);
+      const fz = -Math.cos(player.yaw);
+      return (dx * fx + dz * fz) / len > Math.cos(halfAngle);
+    }
+
     function findSpawnPosition(minDist) {
+      if (isGauntletMap(CURRENT_MAP)) {
+        // The course is a corridor, not an open field — a ring around the player would put
+        // zombies in the void. Respawn onto the authored floor spots instead, preferring
+        // ones the player has not already walked past.
+        const spots = (gauntletCourse && gauntletCourse.spots) || [];
+        if (!spots.length) return { x: player.position.x, z: player.position.z - 12, usedDist: 0 };
+        let best = spots[0], bestScore = -Infinity;
+        for (const sp of spots) {
+          const d = Math.hypot(sp.x - player.position.x, sp.z - player.position.z);
+          const ahead = sp.z < player.position.z ? 14 : 0;   // in front of you is better
+          const score = ahead + Math.min(d, 30) + Math.random() * 8 - (d < 8 ? 60 : 0);
+          if (score > bestScore) { bestScore = score; best = sp; }
+        }
+        return { x: best.x, z: best.z, usedDist: 0 };
+      }
       if (isBossArenaMap(CURRENT_MAP)) {
         const half = 45;
         for (let attempt = 0; attempt < 40; attempt++) {
@@ -5354,11 +5803,13 @@
           if (attempt > 0 && attempt % 22 === 0) {
             dist = Math.max(SPAWN_MIN_DIST_FLOOR, dist * 0.62);
           }
-          const ang = Math.random() * Math.PI * 2;
-          const rad = dist + Math.random() * (MAZE_CHUNK_WORLD * 2.2);
+          const ang = nextSpawnAngle(Math.random);
+          const rad = dist + Math.random() * (MAZE_CHUNK_WORLD * 0.9) * spawnBandScale(Math.random);
           const x = px + Math.cos(ang) * rad;
           const z = pz + Math.sin(ang) * rad;
           if (!arenaXZClearForSpawn(x, z, 0.5)) continue;
+          // First two thirds of the attempts insist on spawning out of sight.
+          if (attempt < 60 && inPlayerViewCone(x, z)) continue;
           let tooClose = false;
           for (const p of players) {
             const dx = x - p.x;
@@ -5389,9 +5840,16 @@
           dist = Math.max(SPAWN_MIN_DIST_FLOOR, dist * 0.6);
         }
         const rnd = _spawnRng || Math.random;
-        const x = (rnd() * 2 - 1) * S;
-        const z = (rnd() * 2 - 1) * S;
+        // Ring around the player on a round-robin sector rather than a uniform point in the
+        // square — a uniform square point biases toward the corners and clumps by luck.
+        const ang = nextSpawnAngle(rnd);
+        const rad = dist * spawnBandScale(rnd) + rnd() * 12;
+        let x = player.position.x + Math.cos(ang) * rad;
+        let z = player.position.z + Math.sin(ang) * rad;
+        x = THREE.MathUtils.clamp(x, -S, S);
+        z = THREE.MathUtils.clamp(z, -S, S);
         if (enemyCollidesWall(x, z, 0.5)) continue;
+        if (attempt < 40 && inPlayerViewCone(x, z)) continue;
         let tooClose = false;
         for (const p of players) {
           const dx = x - p.x, dz = z - p.z;
@@ -5429,6 +5887,19 @@
     const CROUCH_EYE_DROP = 0.62;   // metres the camera falls at full crouch
     const CROUCH_SPEED_MUL = 0.45;  // walk speed multiplier while fully crouched
     let crouchAmt = 0;
+
+    /**
+     * Dash stamina. Before this, dash was gated only by a 350 ms cooldown, which is no
+     * gate at all — you could blink across a whole map without ever paying for it.
+     * Three dashes empty the bar; it only starts refilling after you stop dashing.
+     * A jet dash costs half, otherwise the harness's 10-second window would be spent
+     * before you got anywhere.
+     */
+    const STAMINA_MAX            = 100;
+    const STAMINA_DASH_COST      = 34;    // → 2 dashes from full, 3rd needs a sliver of regen
+    const STAMINA_JET_DASH_COST  = 17;
+    const STAMINA_REGEN_PER_SEC  = 26;    // full refill ≈ 3.8 s
+    const STAMINA_REGEN_DELAY_MS = 900;   // quiet time before the bar starts coming back
     const state = {
       locked: false,
       mouseDown: false,
@@ -5469,6 +5940,8 @@
       slowUntil: 0,
       dashCooldownEnd: 0,
       dashDisabledUntil: 0,
+      stamina: STAMINA_MAX,
+      staminaRegenAt: 0,
       // Time-based (true-velocity) dash state. The C-key dash now plays out over
       // DASH_DURATION_MS instead of teleporting; direction is captured at press time
       // and integrated each frame in updatePlayer.
@@ -6715,6 +7188,12 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         ${weaponLine}
         ${hudHealthLbl}: ${Math.max(0, Math.floor(player.health))} / ${player.maxHealth}<br>
         ${isTrainingMap(CURRENT_MAP) ? "" : `${hudScoreLbl}: ${state.score}`}
+        ${isGauntletMap(CURRENT_MAP) && gauntletCourse ? `<br><b style="color:#62ffb0;">${
+          tr("hudGauntletLevel", "GAUNTLET {n}/{m}")
+            .replace("{n}", String(gauntletLevel)).replace("{m}", String(GAUNTLET_LEVEL_COUNT))
+        } — ${tr("hudGauntletGoal", "REACH THE EXIT")}</b> <span style="opacity:0.8;">(${
+          Math.max(0, Math.round(player.position.z - gauntletCourse.finishZ))
+        }m)</span>` : ""}
       `;
       // Avoid rewriting the HUD DOM when the rendered string is unchanged (the common case).
       if (hudHtml !== _lastHudHtml) {
@@ -6773,7 +7252,14 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
      * supported and the dead zone cannot exist.
      */
     function centreOverBoxTop(box, cx, cz) {
-      const m = player.radius * 0.5; // 0.17
+      // Gauntlet floor slabs use a wider skirt. A floor is built from many boxes laid end to
+      // end, and with the narrow 0.17 skirt the player's 0.34 collision sphere hit the SIDE
+      // FACE of the next slab before their centre was over it — every seam between two
+      // platforms became an invisible wall and the course was impassable. A skirt of
+      // radius+0.06 means you become exempt exactly as the sphere first touches.
+      // Both the exemption and the landing check call this one function, so widening it here
+      // keeps the v9 invariant intact: anywhere you are exempt, you are also supported.
+      const m = box.wideTop ? player.radius + 0.06 : player.radius * 0.5; // 0.40 / 0.17
       return (
         cx > box.min.x - m && cx < box.max.x + m &&
         cz > box.min.z - m && cz < box.max.z + m
@@ -6824,10 +7310,13 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
     function collidesWithWalls(pos) {
       _playerWallSphere.radius = player.radius;
       const pBottom = player.position.y - 1.65;
-      const pTop = player.position.y;
+      // Head height must follow the crouch, otherwise crouching is cosmetic: a slab you
+      // can duck under visually would still stop you, because pTop stayed at the standing
+      // eye. This is what makes "crouch to get through" a real mechanic.
+      const pTop = player.position.y - CROUCH_EYE_DROP * crouchAmt;
       let hit = false;
       forEachNearbyWallBox(pos.x, pos.z, (box) => {
-        if (hit) return;
+        if (hit || box.enemyOnly) return;
         // Skip if feet are clearly above this box (stepped / jumped over it)
         if (pBottom > box.max.y + 0.02 || pTop < box.min.y) return;
         // If feet are at or near box top, check whether the player is currently
@@ -6848,19 +7337,30 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
      * Clamps a climb so the player's head does not enter the underside of solid cover, and
      * a descent so they do not sink through the floor. Returns the resolved eye Y.
      */
+    /**
+     * Eye Y of the implicit floor-everywhere. Every map except the gauntlet has solid
+     * ground at 0, which is why pits were impossible; the gauntlet pushes it far below the
+     * course so the only real support is a platform top.
+     */
+    function worldFloorEyeY() {
+      return isGauntletMap(CURRENT_MAP) ? GAUNTLET_FLOOR_EYE_Y : 1.65;
+    }
+
     function resolveVerticalStep(fromY, stepY) {
       let toY = fromY + stepY;
-      if (toY <= 1.65) return 1.65;
+      const floorY = worldFloorEyeY();
+      if (toY <= floorY) return floorY;
       if (stepY <= 0) return toY;
       const px = player.position.x;
       const pz = player.position.z;
       const r = player.radius;
       forEachNearbyWallBox(px, pz, (box) => {
+        if (box.enemyOnly) return;
         // Only boxes we actually stand under matter.
         if (px < box.min.x - r || px > box.max.x + r) return;
         if (pz < box.min.z - r || pz > box.max.z + r) return;
         // Underside of a box that is above our head now but below where we are heading.
-        if (box.min.y >= fromY && box.min.y < toY) toY = box.min.y;
+        if (box.min.y >= fromY - CROUCH_EYE_DROP * crouchAmt && box.min.y < toY) toY = box.min.y;
       });
       return toY;
     }
@@ -12430,6 +12930,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           showCombatFeedback(tr("jetBusy", "STRAPPING IN..."), "#88ccff", 0.25);
         } else if (nowC < state.dashDisabledUntil) {
           showCombatFeedback("DASH LOCKED " + Math.ceil((state.dashDisabledUntil - nowC) / 1000) + "s", "#ff4422", 0.25);
+        } else if (state.stamina < (isJetActive() ? STAMINA_JET_DASH_COST : STAMINA_DASH_COST)) {
+          showCombatFeedback(tr("staminaEmpty", "OUT OF STAMINA"), "#ffb21f", 0.25);
         } else if (nowC >= state.dashCooldownEnd) {
           // True velocity-based dash. DASH_DIST units over DASH_DURATION_MS (≈200ms —
           // half the prior 400ms, so the dash is 2× faster and more responsive).
@@ -12474,6 +12976,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           if (jetting) playJetBurstSound();
           else playDashSound();
           state.dashCooldownEnd = nowC + 350;
+          state.stamina = Math.max(0, state.stamina - (jetting ? STAMINA_JET_DASH_COST : STAMINA_DASH_COST));
+          state.staminaRegenAt = nowC + STAMINA_REGEN_DELAY_MS;
           state.camShake = Math.max(state.camShake, jetting ? 0.1 : 0.06);
           e.preventDefault();
         }
@@ -12652,6 +13156,12 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         player.yaw = Math.PI;
         floor.visible = false;
         ceiling.visible = false;
+      } else if (isGauntletMap(CURRENT_MAP)) {
+        const cp = gauntletCourse && gauntletCourse.checkpoints[0];
+        player.position.set(cp ? cp.x : 0, cp ? cp.y : 1.65, cp ? cp.z : 0);
+        player.yaw = 0;   // yaw 0 looks down -Z, which is the way the course runs
+        floor.visible = false;
+        ceiling.visible = false;
       } else if (isTrainingMap(CURRENT_MAP)) {
         // yaw 0 looks down -Z, which is where the whole range lives. This used to be
         // Math.PI, i.e. facing the wall behind the firing line with every target at your
@@ -12744,10 +13254,31 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       player.position.set(s.x, 1.65, s.z);
     }
 
-    const ZOMBIE_TYPES = [
-      "normal", "fast", "gunner", "normal", "normal", "fast", "gunner", "tank",
-      "normal", "fast", "gunner", "tank", "normal", "fast", "gunner", "normal"
-    ];
+    /**
+     * Exact roster composition rather than a repeating pattern. The old
+     * `ZOMBIE_TYPES[i % len]` cycled a fixed list, so the mix AND the order were identical
+     * every run — and since spawn placement is now sector round-robin, a fixed order meant
+     * the tanks landed in the same relative sectors every time. Fixed counts + a shuffle
+     * keeps the balance exact while randomising where each type ends up.
+     */
+    const ZOMBIE_MIX = { normal: 0.50, fast: 0.25, gunner: 0.18, tank: 0.07 };
+    function buildZombieComposition(count) {
+      const out = [];
+      for (const [type, share] of Object.entries(ZOMBIE_MIX)) {
+        for (let i = 0; i < Math.round(count * share); i++) out.push(type);
+      }
+      while (out.length < count) out.push("normal");
+      out.length = count;
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [out[i], out[j]] = [out[j], out[i]];
+      }
+      return out;
+    }
+    /** Respawn delay with jitter — a wiped-out wave used to come back in perfect lockstep. */
+    function zombieRespawnDelay() {
+      return 3.0 + Math.random() * 3.5;
+    }
     /** Gunner (ranged): seconds of clear line-of-sight to target before firing is allowed. Resets when LOS breaks. */
     const RANGED_LOS_ACQUIRE_DELAY = 0.62;
     /**
@@ -12773,6 +13304,35 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         return;
       }
 
+      if (isGauntletMap(CURRENT_MAP)) {
+        const spec = gauntletCourse ? gauntletCourse.spec : null;
+        if (!spec) return;
+        const spots = gauntletCourse.spots.slice();
+        const n = Math.min(spec.z || 0, spots.length);
+        const composition = buildZombieComposition(n);
+        for (let i = 0; i < n; i++) {
+          const sp = spots.splice(Math.floor(Math.random() * spots.length), 1)[0];
+          const zomb = makeZombie(sp.x, sp.z, composition[i]);
+          // Zombie Y is driven from baseY every frame (baseY + walk bob), so writing
+          // group.position.y here would be overwritten on the next tick.
+          zomb.baseY = sp.y;
+          zomb.group.position.y = sp.y;
+          zomb.netIndex = i;
+          drawEnemyHp(zomb);
+          state.enemies.push(zomb);
+        }
+        if (spec.boss && gauntletCourse.bossSpot) {
+          const bs = gauntletCourse.bossSpot;
+          // The boss pins itself to the BOSS_BASE_Y constant every frame, so its room is
+          // always authored at ground level (see the level table) and no Y fixup is needed.
+          const boss = makeHormoneZombie(bs.x, bs.z, !!spec.hell);
+          boss.netIndex = state.enemies.length;
+          drawEnemyHp(boss);
+          state.enemies.push(boss);
+        }
+        return;
+      }
+
       _spawnRng = MULTIPLAYER && ARENA_COOP && activeRoomId
         ? mulberry32(hashRoomSeed(activeRoomId))
         : null;
@@ -12789,9 +13349,10 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         return;
       }
 
+      const composition = buildZombieComposition(ZOMBIE_COUNT);
       for (let i = 0; i < ZOMBIE_COUNT; i++) {
         const { x, z } = findSpawnPosition(SPAWN_MIN_DIST_BASE);
-        const type = ZOMBIE_TYPES[i % ZOMBIE_TYPES.length];
+        const type = composition[i];
         const zombie = makeZombie(x, z, type);
         zombie.netIndex = i;
         drawEnemyHp(zombie);
@@ -12884,7 +13445,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         }
         if (ph.enemy.hp <= 0 && ph.enemy.alive) {
           ph.enemy.alive = false;
-          ph.enemy.respawnTimer = 3.0;
+          ph.enemy.respawnTimer = zombieRespawnDelay();
           ph.enemy.dissolveTimer = DISSOLVE_DURATION + 0.12;
           spawnHumanoidDissolve(ph.enemy.group, bp);
           ph.enemy.group.visible = false;
@@ -12925,36 +13486,92 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       return true;
     }
 
+    /**
+     * Ray vs axis-aligned box in local space. Returns the near hit distance along the ray,
+     * or 0 if the origin is already inside, or null on a miss.
+     */
+    function rayBoxParam(ox, oy, oz, dx, dy, dz, b, pad) {
+      // Expand about the centre so `pad` behaves the same way it did for spheres.
+      const cx = (b.x0 + b.x1) * 0.5, cy = (b.y0 + b.y1) * 0.5, cz = (b.z0 + b.z1) * 0.5;
+      const hx = (b.x1 - b.x0) * 0.5 * pad, hy = (b.y1 - b.y0) * 0.5 * pad, hz = (b.z1 - b.z0) * 0.5 * pad;
+      let tmin = -Infinity, tmax = Infinity;
+      const axes = [[ox, dx, cx, hx], [oy, dy, cy, hy], [oz, dz, cz, hz]];
+      for (let i = 0; i < 3; i++) {
+        const o = axes[i][0], d = axes[i][1], c = axes[i][2], h = axes[i][3];
+        if (Math.abs(d) < 1e-9) {
+          if (o < c - h || o > c + h) return null;
+          continue;
+        }
+        let t0 = (c - h - o) / d, t1 = (c + h - o) / d;
+        if (t0 > t1) { const t = t0; t0 = t1; t1 = t; }
+        if (t0 > tmin) tmin = t0;
+        if (t1 < tmax) tmax = t1;
+        if (tmin > tmax) return null;
+      }
+      if (tmax < 0) return null;
+      return tmin < 0 ? 0 : tmin;
+    }
+
+    /**
+     * Hormone Zombie hit zones, as boxes matched to the actual mesh extents in root space.
+     *
+     * These used to be spheres, and they were wildly oversized: the head sphere sat at
+     * cz 0.55 with r 0.45, so it reached z 1.00 while the skull ends at 0.71 — half a metre
+     * of empty air in front of the face registered as a HEADSHOT. The body sphere was r 0.90
+     * (the chest is 0.65 deep) centred at cz 0.10, so it reached z -0.80 while the back ends
+     * at -0.40 — shots well BEHIND the boss registered as body hits. Both errors are then
+     * multiplied by the boss scale (2.0, or 2.6 for the hell boss).
+     *
+     * Boxes fit a box-built model exactly, so they simply do not have this failure mode.
+     * Extents below are read off the mesh positions in makeHormoneZombie().
+     */
+    const BOSS_HIT_BOXES = [
+      // skull + jaw + brow + nose + ears, headGroup at (0, 1.96, 0.50)
+      { x0: -0.32, x1: 0.32, y0: 1.60, y1: 2.24, z0: 0.22, z1: 0.82, zone: "head" },
+      // Torso is split at the waist. One box for the whole trunk had to be as deep as the
+      // chest (z 0.62), which left ~0.8 world units of air in front of the much thinner
+      // belly still reading as a body hit.
+      { x0: -0.70, x1: 0.70, y0: 1.15, y1: 2.24, z0: -0.45, z1: 0.62, zone: "body" },  // chest + back + traps
+      { x0: -0.45, x1: 0.45, y0: 0.58, y1: 1.15, z0: -0.28, z1: 0.32, zone: "body" },  // midriff + belly + hip
+      // arms hang wide off the shoulders at x ±0.80
+      { x0: 0.55, x1: 1.30, y0: 0.75, y1: 2.05, z0: -0.35, z1: 0.50, zone: "body" },
+      { x0: -1.30, x1: -0.55, y0: 0.75, y1: 2.05, z0: -0.35, z1: 0.50, zone: "body" },
+      // thigh + shin + foot; z is widened to cover the swing, since zones stay fixed in
+      // root space by design (so torso sway cannot drag the hitboxes around).
+      { x0: 0.08, x1: 0.52, y0: -0.38, y1: 0.70, z0: -0.55, z1: 0.55, zone: "leg" },
+      { x0: -0.52, x1: -0.08, y0: -0.38, y1: 0.70, z0: -0.55, z1: 0.55, zone: "leg" },
+    ];
+
     /** Head / torso / leg spheres in humanoid root space (zombies + remote PvP avatars). */
     function humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, pad = 1) {
       rootGroup.updateMatrixWorld(true);
       _invEnemyMat.copy(rootGroup.matrixWorld).invert();
       _ehLo.copy(raycaster.ray.origin).applyMatrix4(_invEnemyMat);
       _ehLd.copy(raycaster.ray.direction).transformDirection(_invEnemyMat).normalize();
-      const volumes = isBossEnemy ? [
-        { cx: 0, cy: 1.98, cz: 0.55, r: 0.45, zone: "head" },
-        { cx: 0, cy: 1.55, cz: 0.10, r: 0.90, zone: "body" },
-        { cx: -0.85, cy: 1.40, cz: 0.10, r: 0.42, zone: "body" },
-        { cx: 0.85, cy: 1.40, cz: 0.10, r: 0.42, zone: "body" },
-        { cx: -0.90, cy: 0.90, cz: 0.10, r: 0.38, zone: "body" },
-        { cx: 0.90, cy: 0.90, cz: 0.10, r: 0.38, zone: "body" },
-        { cx: -0.30, cy: 0.68, cz: 0, r: 0.32, zone: "leg" },
-        { cx: 0.30, cy: 0.68, cz: 0, r: 0.32, zone: "leg" },
-        { cx: -0.30, cy: 0.25, cz: 0, r: 0.30, zone: "leg" },
-        { cx: 0.30, cy: 0.25, cz: 0, r: 0.30, zone: "leg" },
-      ] : [
-        { cx: 0, cy: 1.82, cz: 0, r: 0.3, zone: "head" },
-        { cx: 0, cy: 1.12, cz: 0, r: 0.52, zone: "body" },
-        { cx: 0, cy: 0.42, cz: 0, r: 0.46, zone: "leg" },
-      ];
       let bestLocalT = Infinity;
       let zone = null;
-      for (let vi = 0; vi < volumes.length; vi++) {
-        const v = volumes[vi];
-        const t = raySphereParam(_ehLo, _ehLd, v.cx, v.cy, v.cz, v.r * pad);
-        if (t !== null && t < bestLocalT) {
-          bestLocalT = t;
-          zone = v.zone;
+      if (isBossEnemy) {
+        for (let vi = 0; vi < BOSS_HIT_BOXES.length; vi++) {
+          const b = BOSS_HIT_BOXES[vi];
+          const t = rayBoxParam(_ehLo.x, _ehLo.y, _ehLo.z, _ehLd.x, _ehLd.y, _ehLd.z, b, pad);
+          if (t !== null && t < bestLocalT) {
+            bestLocalT = t;
+            zone = b.zone;
+          }
+        }
+      } else {
+        const volumes = [
+          { cx: 0, cy: 1.82, cz: 0, r: 0.3, zone: "head" },
+          { cx: 0, cy: 1.12, cz: 0, r: 0.52, zone: "body" },
+          { cx: 0, cy: 0.42, cz: 0, r: 0.46, zone: "leg" },
+        ];
+        for (let vi = 0; vi < volumes.length; vi++) {
+          const v = volumes[vi];
+          const t = raySphereParam(_ehLo, _ehLd, v.cx, v.cy, v.cz, v.r * pad);
+          if (t !== null && t < bestLocalT) {
+            bestLocalT = t;
+            zone = v.zone;
+          }
         }
       }
       if (bestLocalT === Infinity || zone === null) return null;
@@ -13519,6 +14136,63 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       _altTickEl = tick;
     }
 
+    let _stamWrapEl = null, _stamFillEl = null, _stamTextEl = null;
+    function buildStaminaHud() {
+      if (_stamWrapEl) return;
+      const wrap = document.createElement("div");
+      wrap.id = "dashStaminaHud";
+      wrap.style.cssText =
+        "position:fixed;left:50%;bottom:205px;transform:translateX(-50%);z-index:43;" +
+        "display:none;flex-direction:column;align-items:center;gap:4px;" +
+        "pointer-events:none;user-select:none;font-family:var(--game-font-ui);";
+      const txt = document.createElement("div");
+      txt.style.cssText =
+        "font-size:11px;letter-spacing:2px;color:#9fd8ff;text-shadow:0 1px 4px rgba(0,0,0,0.9);";
+      const track = document.createElement("div");
+      track.style.cssText =
+        "position:relative;width:230px;height:9px;border-radius:5px;overflow:hidden;" +
+        "background:linear-gradient(180deg,rgba(12,14,18,0.92),rgba(0,0,0,0.72));" +
+        "border:1px solid rgba(255,255,255,0.18);box-shadow:0 2px 8px rgba(0,0,0,0.6);";
+      // Tick marks at each whole dash, so you can read "do I have another dash?" at a glance
+      // instead of estimating a percentage.
+      for (let i = 1; i * STAMINA_DASH_COST < STAMINA_MAX; i++) {
+        const t = document.createElement("div");
+        t.style.cssText =
+          "position:absolute;top:0;bottom:0;width:1px;background:rgba(255,255,255,0.30);" +
+          "left:" + ((i * STAMINA_DASH_COST / STAMINA_MAX) * 100).toFixed(1) + "%;";
+        track.appendChild(t);
+      }
+      const fill = document.createElement("div");
+      fill.style.cssText =
+        "position:absolute;left:0;top:0;bottom:0;width:100%;" +
+        "background:linear-gradient(180deg,#7fe3ff,#1f9dd8);" +
+        "box-shadow:inset 0 1px 0 rgba(255,255,255,0.3);transition:width 0.05s linear;";
+      track.appendChild(fill);
+      wrap.appendChild(txt);
+      wrap.appendChild(track);
+      document.body.appendChild(wrap);
+      _stamWrapEl = wrap; _stamFillEl = fill; _stamTextEl = txt;
+    }
+
+    function updateStaminaHud() {
+      buildStaminaHud();
+      if (!_stamWrapEl) return;
+      const inGame = gameWorldReady && menuEl && menuEl.style.display === "none" && player.health > 0;
+      if (!inGame) { _stamWrapEl.style.display = "none"; return; }
+      _stamWrapEl.style.display = "flex";
+      const frac = THREE.MathUtils.clamp(state.stamina / STAMINA_MAX, 0, 1);
+      _stamFillEl.style.width = (frac * 100).toFixed(1) + "%";
+      const dashes = Math.floor(state.stamina / STAMINA_DASH_COST);
+      const dry = dashes < 1;
+      _stamFillEl.style.background = dry
+        ? "linear-gradient(180deg,#ff8a5c,#d8451f)"
+        : "linear-gradient(180deg,#7fe3ff,#1f9dd8)";
+      _stamTextEl.style.color = dry ? "#ffb08f" : "#9fd8ff";
+      // NOTE: K() is a local of updateHud() — use the underlying helpers directly here.
+      _stamTextEl.textContent =
+        tr("hudStamina", "STAMINA") + "  " + dashes + "× " + codeToLabel(kbCode("dash"));
+    }
+
     function updateAltGauge() {
       buildAltGauge();
       if (!_altGaugeEl) return;
@@ -14056,7 +14730,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         drawEnemyHp(bestEnemy);
         if (bestEnemy.hp <= 0 && bestEnemy.alive) {
           bestEnemy.alive = false;
-          bestEnemy.respawnTimer = 3.0;
+          bestEnemy.respawnTimer = zombieRespawnDelay();
           bestEnemy.dissolveTimer = DISSOLVE_DURATION + 0.12;
           spawnHumanoidDissolve(bestEnemy.group, bp);
           bestEnemy.group.visible = false;
@@ -14390,7 +15064,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
             drawEnemyHp(bestEnemy);
             if (bestEnemy.hp <= 0 && bestEnemy.alive) {
               bestEnemy.alive = false;
-              bestEnemy.respawnTimer = 3.0;
+              bestEnemy.respawnTimer = zombieRespawnDelay();
               bestEnemy.dissolveTimer = DISSOLVE_DURATION + 0.12;
               spawnHumanoidDissolve(bestEnemy.group, bp);
               bestEnemy.group.visible = false;
@@ -14412,7 +15086,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
             applyDamage(bestEnemy, bestEnemyZone, w);
             if (bestEnemy.hp <= 0 && bestEnemy.alive) {
               bestEnemy.alive = false;
-              bestEnemy.respawnTimer = 3.0;
+              bestEnemy.respawnTimer = zombieRespawnDelay();
               bestEnemy.dissolveTimer = DISSOLVE_DURATION + 0.12;
               spawnHumanoidDissolve(bestEnemy.group, bp);
               bestEnemy.group.visible = false;
@@ -14773,6 +15447,11 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         if (keys.a) move.sub(right);
       }
 
+      // Stamina regen — only after the quiet window, so dash-spam never tops itself up.
+      if (state.stamina < STAMINA_MAX && performance.now() >= state.staminaRegenAt) {
+        state.stamina = Math.min(STAMINA_MAX, state.stamina + STAMINA_REGEN_PER_SEC * dt);
+      }
+
       // Crouch depth. Ground only, and never mid-dash or mid-flight — crouching in the air
       // would just be a free hitbox shrink.
       {
@@ -14812,8 +15491,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       }
 
       const _wasAirborne = !player.onGround || _dashing;
-      if (player.position.y <= 1.65) {
-        player.position.y = 1.65;
+      const _floorEyeY = worldFloorEyeY();
+      if (player.position.y <= _floorEyeY) {
+        player.position.y = _floorEyeY;
         player.velocityY = 0;
         player.onGround = true;
       } else if (player.velocityY <= 0) {
@@ -14824,7 +15504,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         const pz = player.position.z;
         let landed = false;
         forEachNearbyWallBox(px, pz, (box) => {
-          if (landed) return;
+          if (landed || box.enemyOnly) return;
           const topY = box.max.y;
           // Feet must be within a thin slab just above the box top
           if (feetY >= topY - 0.42 && feetY <= topY + 0.08) {
@@ -15737,6 +16417,15 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
       for (let ei = 0; ei < state.enemies.length; ei++) {
         const enemy = state.enemies[ei];
+        // Training targets are owned entirely by updateTrainingDummies(). makeTrainingDummy()
+        // already strips their AI state for exactly this reason, but the AI loop still ran
+        // over them, and the two systems then fought over the same model every frame:
+        //   • the boss branch drove torsoRoot / arms / legs / position.y while
+        //     updateTrainingDummies wrote position.y and rotation.y — that is the mangled,
+        //     back-bent pose on the boss target;
+        //   • the distance-cull line reset group.visible to true, undoing the visible=false
+        //     set on death — that is why a killed target stood there instead of dissolving.
+        if (enemy.trainingDummy) continue;
         // Distance gate: skip AI for enemies far from the player. Boss always runs
         // (it's the only enemy and must react globally). For zombies, only run the
         // heavy AI logic when the enemy is within ~60 units of the player.
@@ -15747,9 +16436,13 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           // Far zombies are >90% fogged (AI already frozen at AI_SKIP_DIST_SQ) — hide
           // them so we don't keep drawing + skinning fully-fogged humanoids each frame.
           const cullDistSq = scene.fog ? (scene.fog.far * 0.9) * (scene.fog.far * 0.9) : d2;
-          const visible = d2 < cullDistSq;
+          const visible = enemy.alive && d2 < cullDistSq;
           if (enemy.group.visible !== visible) enemy.group.visible = visible;
-          if (d2 > AI_SKIP_DIST_SQ) continue;
+          // Only LIVE far zombies may be skipped. The old code skipped dead ones too, so a
+          // zombie that died more than 60 units away never ran its respawn countdown and
+          // stayed dead forever — over a long run the arena quietly drained itself empty.
+          // Respawn bookkeeping is a handful of arithmetic ops; it can run at any range.
+          if (d2 > AI_SKIP_DIST_SQ && enemy.alive) continue;
         }
         if (!enemy.alive) {
           if (enemy._bossDeathHandled !== true && (enemy.summonedBy || enemy.isBoss)) {
@@ -16988,12 +17681,16 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         updateTrainingDummies(dt);
         updateAnimationShowcase(dt);
       }
+      // Outside the training-map block: this was nested inside it, so checkpoints, the
+      // fall-reset and the exit check never ran on the gauntlet map at all.
+      updateGauntlet(dt);
 
       updateInvBar();
       updateSpeedNeedle(dt);
       updateJetHarness(dt);
       updateJetHud();
       updateAltGauge();
+      updateStaminaHud();
       updateHealthBarHud();
 
       if (isArenaLikeMap(CURRENT_MAP) || isBossArenaMap(CURRENT_MAP)) {
@@ -17343,7 +18040,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
       if (isTrainingMap(CURRENT_MAP)) {
         rebuildTrainingDummies();
-      } else if (isArenaLikeMap(CURRENT_MAP) || isBossArenaMap(CURRENT_MAP)) {
+      } else if (isArenaLikeMap(CURRENT_MAP) || isBossArenaMap(CURRENT_MAP) || isGauntletMap(CURRENT_MAP)) {
+        // Gauntlet was missing here, so levels 6-20 loaded with an empty course.
         rebuildEnemyRoster();
         if (isArenaLikeMap(CURRENT_MAP)) {
           for (const e of state.enemies) {
@@ -17453,6 +18151,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
     function goToMenu() {
       clearActiveLoadout();
+      if (_gClearEl) _gClearEl.style.display = "none";
+      gauntletCourse = null;
       hideDeathScreen();
       hidePause();
       closeSettingsModal();
@@ -17500,6 +18200,76 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       try {
         applyLanguageUI();
       } catch (_) {}
+    }
+
+    let _gauntletPanel = null;
+    function buildGauntletPanel() {
+      const wrap = document.querySelector(".menu-panels-wrap");
+      if (!wrap || _gauntletPanel) return;
+      const panel = document.createElement("div");
+      panel.id = "menuGauntlet";
+      panel.className = "menu-subpanel menu-subpanel--wide";
+      panel.style.display = "none";
+
+      const back = document.createElement("button");
+      back.type = "button";
+      back.className = "menu-float-icon menu-back-btn";
+      back.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+      back.addEventListener("click", () => showMenuPanel("menuStart"));
+
+      const h = document.createElement("h2");
+      h.className = "menu-title";
+      h.textContent = tr("gauntletTitle", "GAUNTLET");
+
+      const desc = document.createElement("p");
+      desc.className = "menu-desc";
+      desc.textContent = tr(
+        "gauntletDesc",
+        "20 levels. Reach the exit — clearing the room is never required. 1-5 movement, 6-15 zombies, 16-20 boss."
+      );
+
+      const grid = document.createElement("div");
+      grid.style.cssText =
+        "display:grid;grid-template-columns:repeat(5,58px);gap:8px;margin-top:6px;justify-content:center;";
+
+      panel.appendChild(back);
+      panel.appendChild(h);
+      panel.appendChild(desc);
+      panel.appendChild(grid);
+      wrap.appendChild(panel);
+      _gauntletPanel = { panel, grid };
+    }
+
+    function refreshGauntletPanel() {
+      buildGauntletPanel();
+      if (!_gauntletPanel) return;
+      const { grid } = _gauntletPanel;
+      grid.innerHTML = "";
+      const done = gauntletProgress();
+      for (let lv = 1; lv <= GAUNTLET_LEVEL_COUNT; lv++) {
+        const spec = GAUNTLET_LEVELS[lv - 1];
+        const locked = lv > done + 1;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        const tint = spec.boss ? "#ff7a7a" : spec.z ? "#ffd36a" : "#8fd8ff";
+        btn.style.cssText =
+          "width:58px;height:52px;border-radius:8px;cursor:" + (locked ? "not-allowed" : "pointer") +
+          ";font:700 17px/1 Audiowide,Arial,sans-serif;display:flex;flex-direction:column;" +
+          "align-items:center;justify-content:center;gap:3px;transition:all .12s;" +
+          (locked
+            ? "border:1px solid #3a4048;background:rgba(20,24,30,0.55);color:#5f6a76;"
+            : "border:1px solid " + tint + ";background:rgba(20,24,30,0.8);color:" + tint + ";");
+        const tag = lv <= done ? "✓" : spec.hell ? "☠" : spec.boss ? "☣" : spec.z ? "z" : "»";
+        btn.innerHTML = lv + '<span style="font-size:9px;opacity:0.8;">' + (locked ? "🔒" : tag) + "</span>";
+        btn.title = locked ? tr("gauntletLocked", "Locked") : (lv + " · " + spec.name);
+        if (!locked) btn.addEventListener("click", () => startGauntletLevel(lv));
+        grid.appendChild(btn);
+      }
+    }
+
+    function startGauntletLevel(level) {
+      gauntletLevel = THREE.MathUtils.clamp(level | 0, 1, GAUNTLET_LEVEL_COUNT);
+      void bootGame("gauntlet", false, false, false);
     }
 
     function showMenuPanel(id) {
@@ -17672,6 +18442,17 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       nameInput.focus();
       nameModal._pendingMap = mapName;
     }
+
+    (function injectGauntletEntry() {
+      const host = document.getElementById("menuStart");
+      if (!host) return;
+      const b = document.createElement("button");
+      b.type = "button";
+      b.id = "btnGauntlet";
+      b.textContent = tr("btnGauntlet", "GAUNTLET");
+      b.addEventListener("click", () => { refreshGauntletPanel(); showMenuPanel("menuGauntlet"); });
+      host.appendChild(b);
+    })();
 
     document.getElementById("btnStart").addEventListener("click", () => showMenuPanel("menuStart"));
     document.getElementById("btnStartBack").addEventListener("click", () => showMenuPanel("menuMain"));
