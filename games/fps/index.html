@@ -1800,7 +1800,14 @@
     }
   
     /* ── Inventory / Hotbar ─────────────────────────────────────────────────── */
-    #invBar { font-family: 'Audiowide', sans-serif; }
+    /* v4: the hotbar is no longer permanently parked at the bottom of the screen. It sits
+       just off-frame and slides up whenever the player switches (or tries to switch) weapons,
+       then drops back down. JS drives the transform/opacity; the transition lives here. */
+    #invBar {
+      font-family: 'Audiowide', sans-serif;
+      transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease;
+      will-change: transform, opacity;
+    }
     .inv-slot {
       position: relative;
       display: flex;
@@ -1874,9 +1881,12 @@
     .hb-order-name { font-size: 8px; color: rgba(255,255,255,0.45); font-family:'Audiowide',sans-serif; text-align:center; }
 
     /* ── Health Bar ─────────────────────────────────────────────────────── */
+    /* Bottom stack, floor upward: invBar (0) -> health (96) -> needle/jet (140) -> cast (192).
+       v4 roughly doubled every bar so they read at a glance mid-fight; the offsets below are
+       re-spaced to match the new heights and to clear the pop-up hotbar. */
     #healthBarWrap {
       position: fixed;
-      bottom: 76px;
+      bottom: 96px;
       left: 50%;
       transform: translateX(-50%);
       display: none;
@@ -1888,8 +1898,8 @@
     }
     #healthBarTrack {
       position: relative;
-      width: 238px;
-      height: 10px;
+      width: 420px;
+      height: 22px;
       background: linear-gradient(180deg, rgba(12,14,18,0.92), rgba(0,0,0,0.68));
       border-radius: 6px;
       overflow: hidden;
@@ -1917,7 +1927,7 @@
     #healthBarFill {
       height: 100%;
       width: 100%;
-      border-radius: 5px;
+      border-radius: 10px;
       background: linear-gradient(90deg, #17c85b, #65ff8f);
       box-shadow: 0 0 10px rgba(35,255,120,0.38), inset 0 1px 0 rgba(255,255,255,0.26);
       transition: width 0.12s linear, background 0.28s ease, box-shadow 0.28s ease;
@@ -1933,7 +1943,7 @@
     /* ── Cast Bar (sits above health bar when active) ───────────────────── */
     #castBarWrap {
       position: fixed;
-      bottom: 122px;
+      bottom: 192px;
       left: 50%;
       transform: translateX(-50%);
       display: none;
@@ -1946,22 +1956,25 @@
       font-family: 'Audiowide', sans-serif;
     }
     #castBarLabel {
-      font-size: 8px;
-      letter-spacing: 1.3px;
-      color: rgba(200,220,255,0.75);
+      font-size: 13px;
+      letter-spacing: 2px;
+      color: rgba(210,230,255,0.92);
+      text-shadow: 0 1px 4px rgba(0,0,0,0.85);
     }
     #castBarTrack {
-      width: 160px;
-      height: 4px;
-      background: rgba(0,0,0,0.45);
-      border-radius: 3px;
+      width: 340px;
+      height: 14px;
+      background: linear-gradient(180deg, rgba(12,14,18,0.9), rgba(0,0,0,0.66));
+      border-radius: 7px;
       overflow: hidden;
-      border: 1px solid rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.16);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.6);
     }
     #castBarFill {
       height: 100%;
       width: 0%;
-      border-radius: 3px;
+      border-radius: 7px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.25);
       background: #22ccaa;
       transition: width 0.06s linear;
     }
@@ -1969,7 +1982,7 @@
     /* ── Speed Needle HUD ──────────────────────────────────────────────── */
     #needleHud {
       position: fixed;
-      bottom: 96px;
+      bottom: 140px;
       left: 50%;
       transform: translateX(-50%);
       display: none;
@@ -1982,22 +1995,26 @@
       font-family: 'Audiowide', sans-serif;
     }
     #needleHud .nh-label {
-      font-size: 9px;
-      letter-spacing: 1.2px;
-      color: rgba(150,220,255,0.65);
+      font-size: 14px;
+      letter-spacing: 2px;
+      color: rgba(185,232,255,0.95);
+      text-shadow: 0 1px 4px rgba(0,0,0,0.85);
     }
     #needleHud .nh-bar-wrap {
-      width: 80px;
-      height: 5px;
-      border-radius: 3px;
-      background: rgba(255,255,255,0.10);
+      width: 300px;
+      height: 14px;
+      border-radius: 7px;
+      background: linear-gradient(180deg, rgba(12,14,18,0.9), rgba(0,0,0,0.66));
+      border: 1px solid rgba(255,255,255,0.16);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.6);
       overflow: hidden;
     }
     #needleHud .nh-bar-fill {
       height: 100%;
       width: 100%;
-      border-radius: 3px;
-      background: rgba(150,220,255,0.40);
+      border-radius: 7px;
+      background: rgba(160,225,255,0.75);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.25);
       transition: width 0.08s linear;
     }
     #needleHud.nh-boost .nh-label  { color: #22ff88; text-shadow: 0 0 8px #22ff88aa; }
