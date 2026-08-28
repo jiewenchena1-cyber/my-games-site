@@ -5186,6 +5186,9 @@
       // camera's look direction. (0, 0) means "no recent movement" → dash forward.
       lastMoveX: 0,
       lastMoveZ: 0,
+      /** Banked camera recoil (radians) still owed back to the player after firing stops. */
+      recoilPitchAccum: 0,
+      recoilYawAccum: 0,
       projectiles: [],
       knifeComboIdx: 0,
       lastKnifeSwing: 0,
@@ -5265,6 +5268,8 @@
         soundSkin: "revengeClassic",
         adsFov: 67,
         adsSpeed: 9,
+        recoilKick: 0.018,
+        recoilYaw: 0.005,
       },
       {
         name: "Assault Rifle",
@@ -5286,6 +5291,8 @@
         soundSkin: "ancientPhantom",
         adsFov: 55,
         adsSpeed: 6,
+        recoilKick: 0.011,
+        recoilYaw: 0.004,
       },
       {
         name: "Shotgun",
@@ -5307,6 +5314,8 @@
         soundSkin: "chaosShorty",
         adsFov: 63,
         adsSpeed: 4.5,
+        recoilKick: 0.042,
+        recoilYaw: 0.01,
       },
       {
         name: "SMG",
@@ -5328,6 +5337,8 @@
         soundSkin: "divineSpectre",
         adsFov: 75,
         adsSpeed: 7.5,
+        recoilKick: 0.008,
+        recoilYaw: 0.004,
       },
       {
         name: "Med Kit",
@@ -5369,6 +5380,8 @@
         soundSkin: "dragonOperator",
         adsFov: 26,
         adsSpeed: 3.29,
+        recoilKick: 0.03,
+        recoilYaw: 0.006,
       },
       {
         name: "Paralysis Dart",
@@ -5390,6 +5403,8 @@
         soundSkin: "revengeClassic",
         adsFov: 60,
         adsSpeed: 6,
+        recoilKick: 0.012,
+        recoilYaw: 0.003,
         projectile: true,
         projectileSpeed: 36,
         projectileGravity: 9.8,
@@ -5442,6 +5457,8 @@
         reloadTime: 1e9,
         adsFov: 75,
         adsSpeed: 7.5,
+        recoilKick: 0.004,
+        recoilYaw: 0.002,
       },
     ];
 
@@ -12116,8 +12133,11 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       if (paused || player.health <= 0) return;
       if (dx === 0 && dy === 0) return;
       const sens = getLookSensitivityMul(isAdsLookSensitivityActive());
-      player.yaw -= dx * LOOK_SENS_BASE_YAW * sens * 0.28;
-      player.pitch -= dy * LOOK_SENS_BASE_PITCH * sens * 0.28;
+      const dYaw = -dx * LOOK_SENS_BASE_YAW * sens * 0.28;
+      const dPitch = -dy * LOOK_SENS_BASE_PITCH * sens * 0.28;
+      player.yaw += dYaw;
+      player.pitch += dPitch;
+      consumeRecoilCompensation(dPitch, dYaw);
       const limit = Math.PI / 2 - 0.01;
       player.pitch = Math.max(-limit, Math.min(limit, player.pitch));
     }
@@ -12146,8 +12166,11 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       if (!state.locked) return;
 
       const sens = getLookSensitivityMul(isAdsLookSensitivityActive());
-      player.yaw -= e.movementX * LOOK_SENS_BASE_YAW * sens;
-      player.pitch -= e.movementY * LOOK_SENS_BASE_PITCH * sens;
+      const dYaw = -e.movementX * LOOK_SENS_BASE_YAW * sens;
+      const dPitch = -e.movementY * LOOK_SENS_BASE_PITCH * sens;
+      player.yaw += dYaw;
+      player.pitch += dPitch;
+      consumeRecoilCompensation(dPitch, dYaw);
 
       const limit = Math.PI / 2 - 0.01;
       player.pitch = Math.max(-limit, Math.min(limit, player.pitch));
@@ -13505,6 +13528,65 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       }
     }
 
+    // ── Camera recoil ─────────────────────────────────────────────────────────
+    // Until v6 only the AMR moved the CAMERA when it fired; every other weapon just kicked
+    // the view-model and widened the spread cone, so the gun jumped while the crosshair sat
+    // perfectly still and everything felt like a laser pointer. Each weapon now has a
+    // `recoilKick` (radians of upward pitch per shot) and a small random `recoilYaw`.
+    //
+    // The climb is recoverable, not permanent: every radian added is banked in
+    // recoilPitchAccum and eased back out once the player stops firing, so a burst walks the
+    // sights up and then settles. Pulling the mouse DOWN spends that bank (see
+    // consumeRecoilCompensation) — that way a player who compensates manually doesn't get
+    // the view yanked back down again afterwards, which is what makes recoil learnable.
+    const RECOIL_RECOVER_DELAY_MS = 110;
+    const RECOIL_RECOVER_LAMBDA = 7.5;
+
+    function applyRecoilKick(w, mult) {
+      const kick = (w.recoilKick || 0) * (mult || 1);
+      if (kick <= 0) return;
+      const yawAmp = (w.recoilYaw || 0) * (mult || 1);
+      const yawKick = (Math.random() * 2 - 1) * yawAmp;
+      player.pitch += kick;
+      player.yaw += yawKick;
+      state.recoilPitchAccum += kick;
+      state.recoilYawAccum += yawKick;
+      const limit = Math.PI / 2 - 0.01;
+      player.pitch = Math.max(-limit, Math.min(limit, player.pitch));
+    }
+
+    /** Ease the banked recoil back out once the player stops shooting. */
+    function updateRecoilRecovery(dt) {
+      if (state.recoilPitchAccum === 0 && state.recoilYawAccum === 0) return;
+      if (performance.now() - state.lastShot < RECOIL_RECOVER_DELAY_MS) return;
+      const k = 1 - Math.exp(-RECOIL_RECOVER_LAMBDA * dt);
+      const backPitch = state.recoilPitchAccum * k;
+      const backYaw = state.recoilYawAccum * k;
+      player.pitch -= backPitch;
+      player.yaw -= backYaw;
+      state.recoilPitchAccum -= backPitch;
+      state.recoilYawAccum -= backYaw;
+      if (Math.abs(state.recoilPitchAccum) < 1e-5) state.recoilPitchAccum = 0;
+      if (Math.abs(state.recoilYawAccum) < 1e-5) state.recoilYawAccum = 0;
+      const limit = Math.PI / 2 - 0.01;
+      player.pitch = Math.max(-limit, Math.min(limit, player.pitch));
+    }
+
+    /**
+     * Called with the pitch/yaw the player just applied by hand. Manual downward pull eats
+     * the pending recoil bank so the recovery doesn't fight the player's own compensation.
+     */
+    function consumeRecoilCompensation(dPitch, dYaw) {
+      if (dPitch < 0 && state.recoilPitchAccum > 0) {
+        state.recoilPitchAccum = Math.max(0, state.recoilPitchAccum + dPitch);
+      }
+      if (state.recoilYawAccum !== 0 && dYaw !== 0) {
+        const shrunk = state.recoilYawAccum + dYaw;
+        // Only cancel when the player pulled against the drift, never add to it.
+        if (Math.abs(shrunk) < Math.abs(state.recoilYawAccum)) state.recoilYawAccum = shrunk;
+      }
+    }
+
     function tryShoot() {
       if (!gameWorldReady || paused || player.health <= 0) return;
       if (state.weaponIndex === 4) return;
@@ -13546,6 +13628,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         playGunSound(w);
         startWeaponFireAnim();
         state.recoil += w.recoil;
+        applyRecoilKick(w, 1);
         state.spreadBloom = Math.min(w.spreadBloomMax, state.spreadBloom + w.spreadBloomAdd);
         const totalSpread =
           (w.spreadBase || 0) + state.spreadBloom * 0.5;
@@ -13613,11 +13696,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         recoilMultiplier = adsReady ? 0.62 : THREE.MathUtils.lerp(1.45, 0.85, adsAccuracy * 0.55);
       }
       state.recoil += w.recoil * recoilMultiplier;
-      if (state.weaponIndex === 5) {
-        player.pitch += 0.022 * recoilMultiplier;
-        const pitchLim = Math.PI / 2 - 0.01;
-        player.pitch = Math.max(-pitchLim, Math.min(pitchLim, player.pitch));
-      }
+      applyRecoilKick(w, recoilMultiplier);
       state.spreadBloom = Math.min(
         w.spreadBloomMax,
         state.spreadBloom + w.spreadBloomAdd
@@ -14066,6 +14145,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
     function updateWeapon(dt) {
       const w = weapon();
+      updateRecoilRecovery(dt);
 
       if (state.reloading && performance.now() >= state.reloadEnd) {
         state.reloading = false;
@@ -16617,6 +16697,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       state.reloading = false;
       state.slowUntil = 0;
       state.recoil = 0;
+      state.recoilPitchAccum = 0;
+      state.recoilYawAccum = 0;
       state.spreadBloom = 0;
       state.walkPhase = 0;
       state.smoothHeadBob = 0;
