@@ -4934,7 +4934,10 @@
     // remote player, so it is driven by exactly the same code that animates opponents —
     // if it looks right here, it looks right in a match.
     const SHOWCASE_ID = "__anim_showcase__";
-    const SHOWCASE_HOME = { x: 9, z: 8 };
+    // Front-LEFT of the spawn. It was at (9, 8) — 33° to the right — which is exactly where
+    // the first-person weapon model sits, so it was hidden behind your own gun. The left
+    // third of the screen is clear, and 10 units out is close enough to read the joints.
+    const SHOWCASE_HOME = { x: -6, z: 12 };
     const SHOWCASE_SCRIPT = [
       { name: "IDLE", dur: 2.2, weapon: 1 },
       { name: "WALK", dur: 3.4, weapon: 1, move: 2.0, range: 3.2 },
@@ -4955,8 +4958,11 @@
     let showcaseT = 0;
     let showcaseFireT = 0;
     let showcaseLabel = null;
+    let showcaseProps = [];
 
     function removeAnimationShowcase() {
+      for (const o of showcaseProps) scene.remove(o);
+      showcaseProps = [];
       if (!showcaseRp) return;
       scene.remove(showcaseRp.group);
       remotePlayers.delete(SHOWCASE_ID);
@@ -4972,22 +4978,55 @@
       rp.y = 1.65;
       rp.yaw = Math.PI; // face the firing line
       rp.group.position.set(rp.x, 0, rp.z);
+      // createRemotePlayer() returns a HIDDEN group on purpose: a networked avatar only
+      // unhides once its first `move` packet lands. The showcase never receives one, so
+      // without this it stays permanently invisible — the bug that made v10's demo a
+      // no-show. Forced true here and re-forced every update below.
+      rp.group.visible = true;
       scene.add(rp.group);
       remotePlayers.set(SHOWCASE_ID, rp);
       showcaseRp = rp;
+
+      // A lit pedestal so the demo is obviously a demo and easy to find. Decorative only —
+      // it is never added to wallMeshes / wallBoxes, so it has no collision and cannot be
+      // stood on or shot.
+      const pad = new THREE.Group();
+      const padBase = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.5, 1.7, 0.16, 28),
+        new THREE.MeshStandardMaterial({ color: 0x243040, roughness: 0.7, metalness: 0.25 })
+      );
+      padBase.position.y = 0.08;
+      pad.add(padBase);
+      const padRing = new THREE.Mesh(
+        new THREE.TorusGeometry(1.5, 0.05, 10, 36),
+        new THREE.MeshStandardMaterial({
+          color: 0x7ec8ff, emissive: 0x2f86c8, emissiveIntensity: 1.1, roughness: 0.4,
+        })
+      );
+      padRing.rotation.x = -Math.PI / 2;
+      padRing.position.y = 0.17;
+      pad.add(padRing);
+      pad.position.set(SHOWCASE_HOME.x, 0, SHOWCASE_HOME.z);
+      pad.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.receiveShadow = true; } });
+      scene.add(pad);
+      const padLight = createPhysicalPointLight(0xbfe4ff, 260, 26, 2.0);
+      padLight.position.set(SHOWCASE_HOME.x, 4.2, SHOWCASE_HOME.z);
+      padLight.castShadow = false;
+      scene.add(padLight);
+      showcaseProps = [pad, padLight];
       showcaseStep = 0;
       showcaseT = 0;
       showcaseFireT = 0;
       // Action caption above the head, on its own sprite so the name tag stays put.
       const cv = document.createElement("canvas");
-      cv.width = 512; cv.height = 64;
+      cv.width = 512; cv.height = 80;
       const ctx = cv.getContext("2d");
       const tex = new THREE.CanvasTexture(cv);
       const spr = new THREE.Sprite(
         new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, fog: false })
       );
-      spr.scale.set(3.4, 0.42, 1);
-      spr.position.set(0, 2.95, 0);
+      spr.scale.set(4.4, 0.69, 1);
+      spr.position.set(0, 3.1, 0);
       spr.renderOrder = 999;
       spr.raycast = () => {};
       rp.group.add(spr);
@@ -4999,12 +5038,22 @@
       showcaseLabel.last = text;
       const { ctx, canvas } = showcaseLabel;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.font = "bold 34px Audiowide, Arial";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.shadowColor = "rgba(0,0,0,0.85)";
-      ctx.shadowBlur = 8;
-      ctx.fillStyle = "#7ec8ff";
+      ctx.shadowColor = "rgba(0,0,0,0.9)";
+      ctx.shadowBlur = 10;
+      // Only the action name — the avatar's own name tag underneath already reads
+      // "ANIMATION DEMO", so a second copy up here was pure duplication.
+      // Shrink to fit: "JET HARNESS — STRAP" overflows 512px at the base size and was
+      // getting its first and last letters clipped off.
+      let px = 46;
+      ctx.font = `bold ${px}px Audiowide, Arial`;
+      const maxW = canvas.width - 24;
+      while (px > 20 && ctx.measureText(text).width > maxW) {
+        px -= 2;
+        ctx.font = `bold ${px}px Audiowide, Arial`;
+      }
+      ctx.fillStyle = "#ffd34d";
       ctx.fillText(text, canvas.width / 2, canvas.height / 2);
       showcaseLabel.tex.needsUpdate = true;
     }
@@ -5021,6 +5070,7 @@
       }
       const cur = SHOWCASE_SCRIPT[showcaseStep % SHOWCASE_SCRIPT.length];
       drawShowcaseLabel(cur.name);
+      if (!rp.group.visible) rp.group.visible = true;
 
       // Weapon — go through the normal equip path so the held model really changes.
       const wantW = cur.weapon | 0;
@@ -16569,7 +16619,15 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           rp.landSquash = Math.max(0, (rp.landSquash || 0) - dt * 4.5);
           const bobTarget = moving && !rpAirborne ? Math.abs(Math.sin(rp.walkPhase)) * 0.055 * stride : 0;
           rp.bodyBobY = dampScalar(rp.bodyBobY || 0, bobTarget, dt, 13);
-          rp.group.position.y += rp.bodyBobY - rp.landSquash * 0.16;
+          // Bob lifts only (never below the floor). The touchdown squash is a vertical
+          // SCALE, not a downward shift — shifting the whole rig down drove the boots up
+          // to 16 cm through the ground. Scaling keeps the soles planted at y=0 and
+          // compresses the body, which is what a landing actually looks like.
+          rp.group.position.y += Math.max(0, rp.bodyBobY);
+          const sq = rp.landSquash;
+          if (sq > 0.001 || rp.group.scale.y !== 1) {
+            rp.group.scale.set(1 + sq * 0.045, 1 - sq * 0.09, 1 + sq * 0.045);
+          }
 
           if (rp.leftLeg && rp.rightLeg) {
             if (rpAirborne) {
