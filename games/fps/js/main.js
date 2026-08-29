@@ -1696,7 +1696,14 @@
       }
       if (!isForMe) return;
       if (isMyAttack) return;
-      player.health = Math.max(0, player.health - (data.damage || 0));
+      // Armour was missing here entirely. In PvP the shooter already priced the shot against
+      // our broadcast armour (the relay only passes `damage` through verbatim), so applying
+      // it again would double-dip. Every other relayed source — co-op zombie hits forwarded
+      // by the host — arrives RAW, and used to ignore armour completely.
+      let netDmg = data.damage || 0;
+      if (!isPvp) netDmg = applyArmorToDamage(netDmg, "body", armorHelmet, armorVest, -1);
+      reportArmorAbsorb((data.damage || 0) - netDmg);
+      player.health = Math.max(0, player.health - netDmg);
       player.regenTimer = 0;
       state.flashTimer = 0.14;
       if (data.x != null && data.z != null) {
@@ -6329,15 +6336,15 @@
      */
     const ARMOR_HELMETS = [
       { name: "None",         mit: 0.00, fovMul: 1.00, hitFade: 1.00 },
-      { name: "Scout Mk I",   mit: 0.10, fovMul: 0.95, hitFade: 0.70 },
-      { name: "Line Mk II",   mit: 0.20, fovMul: 0.88, hitFade: 0.42 },
-      { name: "Siege Mk III", mit: 0.32, fovMul: 0.80, hitFade: 0.18 },
+      { name: "Scout Mk I",   mit: 0.18, fovMul: 0.95, hitFade: 0.70 },
+      { name: "Line Mk II",   mit: 0.32, fovMul: 0.88, hitFade: 0.42 },
+      { name: "Siege Mk III", mit: 0.50, fovMul: 0.80, hitFade: 0.18 },
     ];
     const ARMOR_VESTS = [
       { name: "None",   mit: 0.00, speedMul: 1.00, actionMul: 1.00 },
-      { name: "Light",  mit: 0.10, speedMul: 0.95, actionMul: 1.12 },
-      { name: "Medium", mit: 0.20, speedMul: 0.87, actionMul: 1.28 },
-      { name: "Heavy",  mit: 0.32, speedMul: 0.78, actionMul: 1.50 },
+      { name: "Light",  mit: 0.18, speedMul: 0.95, actionMul: 1.12 },
+      { name: "Medium", mit: 0.32, speedMul: 0.87, actionMul: 1.28 },
+      { name: "Heavy",  mit: 0.50, speedMul: 0.78, actionMul: 1.50 },
     ];
     /** How effective armour is against each weapon. 0 = armour ignored entirely. */
     const WEAPON_ARMOR_MUL = {
@@ -7293,6 +7300,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         ${hudWeaponLbl}: ${weaponDisplayName(state.weaponIndex)}<br>
         ${weaponLine}
         ${hudHealthLbl}: ${Math.max(0, Math.floor(player.health))} / ${player.maxHealth}<br>
+        ${(armorHelmet || armorVest)
+          ? `<span style="color:#7ec8ff;">${tr("hudArmor", "Armour")}: ${myHelmet().name} / ${myVest().name} — ${tr("hudArmorHead", "head")} −${(myHelmet().mit * 100) | 0}% · ${tr("hudArmorBody", "body")} −${(myVest().mit * 100) | 0}%</span><br>`
+          : ""}
         ${isTrainingMap(CURRENT_MAP) ? "" : `${hudScoreLbl}: ${state.score}`}
         ${isGauntletMap(CURRENT_MAP) && gauntletCourse ? `<br><b style="color:#62ffb0;">${
           tr("hudGauntletLevel", "GAUNTLET {n}/{m}")
@@ -9503,19 +9513,22 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           fr(0.34,0.48,0.10,0.42,MB,3);  // magazine (curved)
           fr(0.48,0.18,0.16,0.10,MB,1);  // carry handle
           break;}
-        case 9:{ // AS Val — suppressed rifle, side-rail optic ─────────────
-          fr(0.14,0.20,0.50,0.28,M,2);   // receiver
-          fr(0.62,0.18,0.36,0.20,MD,2);  // integral suppressor (fat)
-          fr(0.66,0.16,0.02,0.24,MB);    // shroud rings
-          fr(0.74,0.16,0.02,0.24,MB);
-          fr(0.82,0.16,0.02,0.24,MB);
-          fr(0.02,0.24,0.12,0.06,ML,1);  // skeleton stock rail
-          fr(0.02,0.36,0.12,0.06,ML,1);
-          fr(0.00,0.22,0.04,0.22,MD,1);  // butt pad
-          fr(0.24,0.46,0.10,0.38,MD,2);  // grip
-          fr(0.34,0.48,0.10,0.42,MB,3);  // magazine
-          fr(0.26,0.08,0.26,0.11,'#1a1a2e',2); // optic body
-          fr(0.48,0.09,0.05,0.09,BL,1);  // lens
+        case 9:{ // AS Val — ribbed suppressor, triangular skeleton stock ─────
+          fr(0.30,0.30,0.30,0.22,M,2);   // receiver
+          fr(0.30,0.24,0.26,0.07,MD,1);  // dust cover
+          fr(0.58,0.26,0.40,0.20,MD,2);  // integral suppressor
+          fr(0.62,0.24,0.015,0.24,MB);   // suppressor ribs
+          fr(0.69,0.24,0.015,0.24,MB);
+          fr(0.76,0.24,0.015,0.24,MB);
+          fr(0.83,0.24,0.015,0.24,MB);
+          fr(0.90,0.24,0.015,0.24,MB);
+          fr(0.93,0.16,0.03,0.11,ML);    // front sight post
+          fr(0.44,0.20,0.05,0.05,ML);    // rear sight
+          fr(0.26,0.52,0.09,0.34,MB,2);  // pistol grip
+          fr(0.36,0.52,0.09,0.36,MD,3);  // curved magazine
+          fr(0.05,0.28,0.24,0.045,ML,1); // stock: top rail
+          fr(0.05,0.50,0.24,0.045,ML,1); // stock: bottom rail
+          fr(0.02,0.26,0.045,0.28,ML,1); // stock: butt plate
           break;}
         case 4:{ // Med Kit ───────────────────────────────────────────────
           fr(0.18,0.08,0.64,0.80,RD,4);  // body
@@ -11564,32 +11577,58 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         root.userData.muzzleNode = muzzleNode;
 
       } else if (type === 9) {
-        // AS Val: integrally suppressed rifle — fat shroud over most of the length,
-        // skeleton stock, rail optic. Reads clearly apart from the AR at a glance.
-        addMeshPart(gunGroup, new THREE.BoxGeometry(0.11, 0.12, 0.40), mDark, 0, 0.02, 0.16);
-        addMeshPart(gunGroup, new THREE.CylinderGeometry(0.046, 0.046, 0.56, 12), mBlack, 0, 0.055, -0.20, barrelZ, 0, 0);
-        addMeshPart(gunGroup, new THREE.CylinderGeometry(0.049, 0.049, 0.06, 12), mMetal, 0, 0.055, -0.46, barrelZ, 0, 0);
-        for (let i = 0; i < 5; i++) {
-          addMeshPart(gunGroup, new THREE.CylinderGeometry(0.050, 0.050, 0.012, 12), mDark, 0, 0.055, -0.06 - i * 0.09, barrelZ, 0, 0);
+        // AS Val, built to the reference photo: AK-pattern receiver, a long ribbed
+        // integral suppressor over the front half, a skeletonised TRIANGULAR side-folding
+        // stock, a curved 20-round magazine, and plain iron sights (the photo has no optic).
+        // Muzzle points -Z; the stock runs back toward +Z.
+
+        // ── receiver + dust cover ──
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.100, 0.115, 0.34), mDark, 0, 0.020, 0.10);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.092, 0.034, 0.30), mMetal, 0, 0.088, 0.09);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.086, 0.040, 0.10), mBlack, 0, 0.060, 0.26); // rear trunnion
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.038, 0.026, 0.06), mDark, 0.052, 0.075, 0.14); // charging handle
+
+        // ── integral suppressor: fat ribbed tube over the whole front half ──
+        addMeshPart(gunGroup, new THREE.CylinderGeometry(0.045, 0.045, 0.60, 14), mBlack, 0, 0.055, -0.24, barrelZ, 0, 0);
+        for (let i = 0; i < 7; i++) {
+          addMeshPart(gunGroup, new THREE.CylinderGeometry(0.050, 0.050, 0.016, 14), mDark, 0, 0.055, -0.03 - i * 0.075, barrelZ, 0, 0);
         }
-        addMeshPart(gunGroup, new THREE.BoxGeometry(0.07, 0.20, 0.10), mDark, 0, -0.16, 0.12);
-        addMeshPart(gunGroup, new THREE.BoxGeometry(0.05, 0.13, 0.08), mBlack, 0, -0.07, -0.02);
-        addMeshPart(gunGroup, new THREE.BoxGeometry(0.018, 0.02, 0.30), mMetal, -0.03, 0.05, 0.44);
-        addMeshPart(gunGroup, new THREE.BoxGeometry(0.018, 0.02, 0.30), mMetal, 0.03, 0.05, 0.44);
-        addMeshPart(gunGroup, new THREE.BoxGeometry(0.09, 0.11, 0.04), mBlack, 0, 0.02, 0.60);
-        addMeshPart(gunGroup, new THREE.BoxGeometry(0.05, 0.05, 0.06), mDark, 0, 0.11, 0.10);
-        addMeshPart(gunGroup, new THREE.CylinderGeometry(0.028, 0.028, 0.20, 10), mDark, 0, 0.145, 0.02, barrelZ, 0, 0);
-        addMeshPart(gunGroup, new THREE.CylinderGeometry(0.026, 0.026, 0.012, 10), mSight, 0, 0.145, 0.115, barrelZ, 0, 0);
-        addMeshPart(gunGroup, new THREE.SphereGeometry(0.005, 8, 8), mDot, 0, 0.145, 0.108);
-        attachEjectPort(gunGroup, root, 0.052, 0.09, 0.10);
-        attachWeaponMag(gunGroup, root, 0, -0.13, 0.08, 0.052, 0.17, 0.09);
+        addMeshPart(gunGroup, new THREE.CylinderGeometry(0.047, 0.047, 0.05, 14), mMetal, 0, 0.055, -0.525, barrelZ, 0, 0); // end cap
+
+        // ── iron sights: front post on a block at the muzzle end, rear notch on the receiver ──
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.030, 0.055, 0.045), mDark, 0, 0.108, -0.46);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.008, 0.030, 0.008), mSight, 0, 0.140, -0.46);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.048, 0.016, 0.030), mDark, 0, 0.108, 0.22);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.010, 0.022, 0.010), mSight, -0.014, 0.122, 0.22);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.010, 0.022, 0.010), mSight, 0.014, 0.122, 0.22);
+
+        // ── grip + trigger guard ──
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.056, 0.185, 0.085), mBlack, 0, -0.155, 0.155, 0.22, 0, 0);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.048, 0.014, 0.105), mDark, 0, -0.070, 0.075);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.020, 0.038, 0.014), mMetal, 0, -0.052, 0.095);
+
+        // ── curved 20-round magazine: two segments, the lower one kicked forward ──
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.050, 0.115, 0.075), mDark, 0, -0.105, 0.020, 0.12, 0, 0);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.048, 0.105, 0.070), mBlack, 0, -0.205, -0.010, 0.30, 0, 0);
+
+        // ── skeleton triangular folding stock ──
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.016, 0.018, 0.30), mMetal, -0.030, 0.075, 0.44, 0.10, 0, 0);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.016, 0.018, 0.30), mMetal, 0.030, 0.075, 0.44, 0.10, 0, 0);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.016, 0.018, 0.26), mMetal, -0.030, -0.040, 0.42, -0.22, 0, 0);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.016, 0.018, 0.26), mMetal, 0.030, -0.040, 0.42, -0.22, 0, 0);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.082, 0.150, 0.020), mBlack, 0, 0.020, 0.585);  // butt plate
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.070, 0.016, 0.016), mMetal, 0, 0.075, 0.300);  // front crossbar
+
+        attachEjectPort(gunGroup, root, 0.052, 0.075, 0.14);
+        attachWeaponMag(gunGroup, root, 0, -0.105, 0.020, 0.050, 0.115, 0.075);
         gunGroup.position.set(0.25, -0.22, -0.80);
         attachViewHandGrips(gunGroup, root, VIEW_HAND_GRIPS[1]);
         attachViewArmsOnGrips(root);
-        adsOffset.set(-0.25, 0.032, 0.30);
+        // Iron sights sit at y 0.108–0.14, so ADS lines the eye up with the sight plane.
+        adsOffset.set(-0.25, 0.020, 0.30);
 
         const muzzleNodeV = new THREE.Object3D();
-        muzzleNodeV.position.set(0, 0.055, -0.50);
+        muzzleNodeV.position.set(0, 0.055, -0.55);
         gunGroup.add(muzzleNodeV);
         root.userData.muzzleNode = muzzleNodeV;
 
@@ -15978,11 +16017,30 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       camera.updateProjectionMatrix();
     }
 
+    /**
+     * Tell the player armour did something. Without this a 32% reduction is completely
+     * invisible mid-fight — which is exactly why it read as "armour isn't working".
+     */
+    let _armorAbsorbAcc = 0;
+    let _armorAbsorbShownAt = 0;
+    function reportArmorAbsorb(absorbed) {
+      if (!(absorbed > 0.5)) return;
+      const now = performance.now();
+      if (now - _armorAbsorbShownAt > 900) _armorAbsorbAcc = 0;
+      _armorAbsorbAcc += absorbed;
+      _armorAbsorbShownAt = now;
+      showCombatFeedback(
+        tr("armorAbsorbed", "ARMOUR −{n}").replace("{n}", String(Math.round(_armorAbsorbAcc))),
+        "#7ec8ff", 0.5);
+    }
+
     function damagePlayer(amount, attacker, zone = "body", widx = -1) {
       if (player.health <= 0) return;
       if (performance.now() < player.spawnProtectUntil) return;
       // Armour is applied here so every incoming source funnels through one place.
+      const rawAmount = amount;
       amount = applyArmorToDamage(amount, zone, armorHelmet, armorVest, widx);
+      reportArmorAbsorb(rawAmount - amount);
       player.health = Math.max(0, player.health - amount);
       player.regenTimer = 0;
       // ── Speed Needle interrupt: boost breaks on hit ──────────────────────
