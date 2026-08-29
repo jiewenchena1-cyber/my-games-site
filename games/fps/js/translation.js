@@ -2141,7 +2141,8 @@ const BTN_EXTRAS_ID = { btnResume: "LANJUTKAN", btnRestart: "MULAI ULANG", btnQu
 // v96: weapon names + map labels + settings panel content + scoreboard headers + hotbar grid +
 // achievement strings for 15 langs. All baked here so every dict gets them via _addIfMissing.
 const V96_EN = {
-  weaponPistol: "Pistol", weaponAR: "AR", weaponShotgun: "Shotgun", weaponSMG: "SMG", weaponMedKit: "Med Kit", weaponAMR: "AMR", weaponDart: "Dart", weaponKnife: "Knife", weaponDev: "???",
+  weaponPistol: "Pistol", weaponAR: "AR", weaponShotgun: "Shotgun", weaponSMG: "SMG", weaponMedKit: "Med Kit", weaponAMR: "AMR", weaponDart: "Dart", weaponKnife: "Knife",
+    weaponAsVal: "AS Val", weaponDev: "???",
   mapArena: "Zombie Arena", mapBossArena: "BOSS FIGHT — Boss", mapPvpClassic: "PVP — Classic", mapPvpGrid: "PVP — Grid", hudBrightDuel: "Bright duel map — flashlight stays off",
   musicByPrefix: "Music by ", musicAuthor: "JimmyQrg", chooseModeToPlay: "CHOOSE A MODE TO PLAY",
   gfxQualityLabel: "Quality", gfxQualityPill: "performance / fidelity", gfxQualityHint: "Does not change zombie sync or gameplay — rendering only. Brightness is matched across tiers so difficulty stays fair.",
