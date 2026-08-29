@@ -317,7 +317,7 @@
     }
 
     let gameSettings = {
-      weaponSlotOrder: [0, 2, 3, 1, 5, 6, 4, 7], // slot 0→7 maps to weapon index; slot 8 is always ～～～
+      weaponSlotOrder: [0, 2, 3, 1, 5, 6, 4, 7, 9], // last entry (AS Val) is key 8; ～～～ stays on /
       keyBindings: defaultKeyBindings(),
       masterVolume: 1,
       musicVolume: 1,
@@ -380,7 +380,7 @@
         if (typeof o.skipClickToPlay === "boolean") {
           gameSettings.skipClickToPlay = o.skipClickToPlay;
         }
-        if (Array.isArray(o.weaponSlotOrder) && o.weaponSlotOrder.length === 8) {
+        if (Array.isArray(o.weaponSlotOrder) && o.weaponSlotOrder.length === 9) {
           gameSettings.weaponSlotOrder = o.weaponSlotOrder;
         }
         if (o.keyBindings && typeof o.keyBindings === "object") {
@@ -515,9 +515,9 @@
 
     // v96: hoisted above updateHud to avoid TDZ on initial load (updateHud runs before the
     // INVENTORY block lower in the file would have initialized these).
-    const WEAPON_NAMES_INV     = ["Pistol","AR","Shotgun","SMG","MedKit","AMR","Dart","Knife","???"];
-    const WEAPON_NAMES_INV_ZH  = ["手枪","突击步枪","霰弹枪","冲锋枪","医疗包","反器材","麻痹镖","匕首","???"];
-    const WEAPON_I18N_KEYS     = ["weaponPistol","weaponAR","weaponShotgun","weaponSMG","weaponMedKit","weaponAMR","weaponDart","weaponKnife","weaponDev"];
+    const WEAPON_NAMES_INV     = ["Pistol","AR","Shotgun","SMG","MedKit","AMR","Dart","Knife","???","AS Val"];
+    const WEAPON_NAMES_INV_ZH  = ["手枪","突击步枪","霰弹枪","冲锋枪","医疗包","反器材","麻痹镖","匕首","???","AS Val"];
+    const WEAPON_I18N_KEYS     = ["weaponPistol","weaponAR","weaponShotgun","weaponSMG","weaponMedKit","weaponAMR","weaponDart","weaponKnife","weaponDev","weaponAsVal"];
     function weaponDisplayName(widx) {
       const k = WEAPON_I18N_KEYS[widx];
       const fallback = WEAPON_NAMES_INV[widx] || "";
@@ -887,6 +887,12 @@
     // travels exactly as far as straight ahead.
     const JET_STRAP_MS        = 3000;   // ms: strapping the harness on
     const JET_ACTIVE_MS       = 10000;  // ms: flight window once it is on
+    /**
+     * Cooldown after the flight window closes. Flight costs NO stamina — the harness never
+     * eats into your ground mobility. What limits it is this: once the 10 s window ends you
+     * wait another 10 s before you can strap in again.
+     */
+    const JET_COOLDOWN_MS     = 10000;
     /** Drop (world units) that turns a landing lethal. One vertical dash climbs JET_DASH_DIST. */
     const JET_FATAL_FALL_DROP = 12.0;
     /** Warn once the player is this far above the surface they last stood on. */
@@ -1282,6 +1288,9 @@
       // Jet harness. Absent field (older client / never used) means 0 — no pack is shown.
       rp.jetState = THREE.MathUtils.clamp(Number(data.jet) | 0, 0, 2);
       rp.crouch = THREE.MathUtils.clamp((Number(data.crouch) || 0) / 100, 0, 1);
+      const packedArm = Number(data.arm) || 0;
+      rp.armorHelmet = THREE.MathUtils.clamp((packedArm / 4) | 0, 0, ARMOR_HELMETS.length - 1);
+      rp.armorVest = THREE.MathUtils.clamp(packedArm % 4, 0, ARMOR_VESTS.length - 1);
       applyRemoteJetPack(rp);
       rp.remotePitch =
         typeof data.pitch === "number"
@@ -1865,7 +1874,9 @@
       for (let i = hitIndicators.length - 1; i >= 0; i--) {
         const ind = hitIndicators[i];
         ind.life -= dt;
-        ind.el.style.opacity = Math.max(0, ind.life / 1.5).toString();
+        // Helmets muffle where damage is coming from: the tier's hitFade scales the
+        // direction indicator down, so a Mk III wearer barely sees it.
+        ind.el.style.opacity = (Math.max(0, ind.life / 1.5) * myHelmet().hitFade).toString();
         const dx = ind.el._fromX != null ? ind.el._fromX - player.position.x : 0;
         const dz = ind.el._fromZ != null ? ind.el._fromZ - player.position.z : 0;
         if (ind.life <= 0) {
@@ -5921,10 +5932,7 @@
      */
     const STAMINA_MAX            = 100;
     const STAMINA_DASH_COST      = 34;    // → 2 dashes from full, 3rd needs a sliver of regen
-    // Jet dashes cost the SAME as ground dashes. They were half price, which meant putting
-    // the harness on doubled your dash count for its whole window — the harness is supposed
-    // to buy you VERTICAL movement, not more of it.
-    const STAMINA_JET_DASH_COST  = 34;
+    // Jet dashes are FREE of stamina — the harness has its own window + cooldown instead.
     const STAMINA_REGEN_PER_SEC  = 26;    // full refill ≈ 3.8 s
     const STAMINA_REGEN_DELAY_MS = 900;   // quiet time before the bar starts coming back
     const state = {
@@ -5997,7 +6005,7 @@
        * it is only ever non-zero while the phase really is non-idle — an unused harness never
        * shows on anyone else's screen.
        */
-      jet: { phase:'idle', startMs:0, endMs:0, charges:1, netState:0 },
+      jet: { phase:'idle', startMs:0, endMs:0, charges:1, netState:0, cooldownUntil:0 },
     };
 
 
@@ -6258,18 +6266,47 @@
         recoilKick: 0.004,
         recoilYaw: 0.002,
       },
+      {
+        // ── AS Val (index 9) ────────────────────────────────────────────────
+        // Damage is the SMG's, unchanged (34 / 20 / 13). What differs is handling: spread
+        // sits between the AR and the SMG, it has a real scope, and ADS pulls the cone in
+        // hard (adsSpreadMul 0.55) rather than merely removing the hip penalty.
+        // Against armour it is the middle option — armorMul 1.20 vs the SMG's 2.25.
+        name: "AS Val",
+        fireDelay: 86,
+        auto: true,
+        pellets: 1,
+        spreadBase: 0.011,        // SMG 0.010 < 0.011 < AR 0.012
+        spreadBloomAdd: 0.0045,   // SMG 0.005 > 0.0045 > AR 0.004
+        spreadBloomMax: 0.046,    // SMG 0.050 > 0.046 > AR 0.042
+        recover: 0.050,
+        recoil: 0.030,
+        damageHead: 34,
+        damageBody: 20,
+        damageLegs: 13,
+        color: 0xc7b6ff,
+        magSize: 20,
+        ammo: 20,
+        reloadTime: 1520,
+        soundSkin: "divineSpectre",
+        adsFov: 52,
+        adsSpeed: 6.5,
+        adsSpreadMul: 0.55,
+        recoilKick: 0.0095,
+        recoilYaw: 0.004,
+      },
     ];
 
+    /**
+     * Weapon availability. The kill-gated unlock ladder is GONE — it added nothing but a wall
+     * in front of new players. Everything is available from the first match; the only thing
+     * still gated is ～～～ (8), which is a hidden weapon, not a progression reward.
+     * The object is kept rather than deleted so the many call sites keep working.
+     */
     const weaponUnlocked = {
-      0: true,   // Pistol — always
-      1: false,  // AR — 30 kills
-      2: false,  // Shotgun — 10 kills
-      3: false,  // SMG — 20 kills
-      4: true,   // Med Kit — always
-      5: false,  // AMR — 1st boss kill
-      6: false,  // Paralysis — 2nd boss kill
-      7: true,   // Knife — always
-      8: false,  // ～～～ — special
+      0: true, 1: true, 2: true, 3: true, 4: true,
+      5: true, 6: true, 7: true, 9: true,
+      8: false,
     };
     /* ── Loadout / backpack ────────────────────────────────────────────────
      * Outside the training range you no longer walk in with the whole armoury. You pick
@@ -6281,7 +6318,72 @@
      *
      * `activeLoadout === null` means "no restriction" and is what the training range uses.
      */
-    const LOADOUT_GUN_POOL = [0, 2, 3, 1, 5, 6];  // Pistol, Shotgun, SMG, AR, AMR, Dart
+    /* ── Armour ───────────────────────────────────────────────────────────────
+     * Two slots, four tiers each (0 = none). Every tier is a straight trade: mitigation up,
+     * something else down. Helmets cover HEAD hits, vests cover BODY and LEG hits, so the
+     * two pieces are a real choice rather than one "armour" number.
+     *
+     * A weapon's armorMul scales the mitigation it faces. Crucially it multiplies the
+     * MITIGATION, not the damage — so against an unarmoured target (mitigation 0) every
+     * weapon deals exactly its normal damage regardless of its multiplier.
+     */
+    const ARMOR_HELMETS = [
+      { name: "None",         mit: 0.00, fovMul: 1.00, hitFade: 1.00 },
+      { name: "Scout Mk I",   mit: 0.10, fovMul: 0.95, hitFade: 0.70 },
+      { name: "Line Mk II",   mit: 0.20, fovMul: 0.88, hitFade: 0.42 },
+      { name: "Siege Mk III", mit: 0.32, fovMul: 0.80, hitFade: 0.18 },
+    ];
+    const ARMOR_VESTS = [
+      { name: "None",   mit: 0.00, speedMul: 1.00, actionMul: 1.00 },
+      { name: "Light",  mit: 0.10, speedMul: 0.95, actionMul: 1.12 },
+      { name: "Medium", mit: 0.20, speedMul: 0.87, actionMul: 1.28 },
+      { name: "Heavy",  mit: 0.32, speedMul: 0.78, actionMul: 1.50 },
+    ];
+    /** How effective armour is against each weapon. 0 = armour ignored entirely. */
+    const WEAPON_ARMOR_MUL = {
+      3: 2.25,  // SMG    — the rework: armour is 225% as effective against it
+      9: 1.20,  // AS Val — middle ground
+      5: 0.00,  // AMR    — anti-materiel: punches straight through
+    };
+    /** Hard ceiling so no combination can make a player effectively immune. */
+    const ARMOR_MIT_CAP = 0.85;
+    const ARMOR_STORAGE_KEY = "fps_armor_v1";
+    let armorHelmet = 0;
+    let armorVest = 0;
+
+    function armorMulForWeapon(widx) {
+      const m = WEAPON_ARMOR_MUL[widx | 0];
+      return m === undefined ? 1.0 : m;
+    }
+    /** Fraction of damage absorbed for a hit zone, given the victim's kit and the weapon. */
+    function armorMitigation(zone, helmetId, vestId, widx) {
+      const h = ARMOR_HELMETS[helmetId | 0] || ARMOR_HELMETS[0];
+      const v = ARMOR_VESTS[vestId | 0] || ARMOR_VESTS[0];
+      const base = zone === "head" ? h.mit : v.mit;
+      if (base <= 0) return 0;                       // unarmoured → damage never changes
+      return Math.min(ARMOR_MIT_CAP, base * armorMulForWeapon(widx));
+    }
+    function applyArmorToDamage(amount, zone, helmetId, vestId, widx) {
+      return amount * (1 - armorMitigation(zone, helmetId, vestId, widx));
+    }
+    function myHelmet() { return ARMOR_HELMETS[armorHelmet] || ARMOR_HELMETS[0]; }
+    function myVest()   { return ARMOR_VESTS[armorVest]   || ARMOR_VESTS[0]; }
+    /** Packed into the `move` payload so a shooter can price a shot before emitting it. */
+    function packArmor() { return (armorHelmet & 3) * 4 + (armorVest & 3); }
+    function loadArmor() {
+      try {
+        const o = JSON.parse(localStorage.getItem(ARMOR_STORAGE_KEY) || "null");
+        if (o) {
+          armorHelmet = THREE.MathUtils.clamp(o.h | 0, 0, ARMOR_HELMETS.length - 1);
+          armorVest = THREE.MathUtils.clamp(o.v | 0, 0, ARMOR_VESTS.length - 1);
+        }
+      } catch (_) {}
+    }
+    function saveArmor() {
+      try { localStorage.setItem(ARMOR_STORAGE_KEY, JSON.stringify({ h: armorHelmet, v: armorVest })); } catch (_) {}
+    }
+
+    const LOADOUT_GUN_POOL = [0, 2, 3, 9, 1, 5, 6];  // Pistol, Shotgun, SMG, AS Val, AR, AMR, Dart
     const LOADOUT_MED = 4;
     const LOADOUT_KNIFE = 7;
     const LOADOUT_HIDDEN = 8;                     // ～～～ — never counts against the limit
@@ -6342,7 +6444,7 @@
     // Own copy of the key labels rather than a reference to INV_KEY_LABELS: the HUD calls
     // this during early init, well before that const is initialised, and reaching for it
     // there threw a TDZ ReferenceError that aborted the whole module.
-    const LOADOUT_SLOT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "0"];
+    const LOADOUT_SLOT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "0", "8"];
     function activeHotbarSlots() {
       if (!activeLoadout) {
         return gameSettings.weaponSlotOrder.map((w, i) => ({ key: LOADOUT_SLOT_KEYS[i], widx: w }));
@@ -6372,10 +6474,8 @@
     }
 
     function resetUnlockProgress() {
-      for (const k of Object.keys(weaponUnlocked)) weaponUnlocked[k] = false;
-      weaponUnlocked[0] = true;
-      weaponUnlocked[4] = true;
-      weaponUnlocked[7] = true;
+      for (const k of Object.keys(weaponUnlocked)) weaponUnlocked[k] = true;
+      weaponUnlocked[8] = false;
       totalKillCount = 0;
       bossKillCount = 0;
       DEV_GUN_UNLOCKED = false;
@@ -7012,6 +7112,7 @@
 
     loadUnlocks();
     loadLoadout();
+    loadArmor();
 
     const WEAPON_UNLOCK_TABLE = [
       { idx: 2, kills: 10, bossKills: 0, label: "霰弹枪 (Shotgun)" },
@@ -7021,21 +7122,9 @@
       { idx: 6, kills: 0, bossKills: 2, label: "麻醉针 (Paralysis Dart)" },
     ];
 
-    function checkWeaponUnlocks() {
-      let changed = false;
-      for (const entry of WEAPON_UNLOCK_TABLE) {
-        if (weaponUnlocked[entry.idx]) continue;
-        const byKills = entry.kills > 0 && totalKillCount >= entry.kills;
-        const byBoss = entry.bossKills > 0 && bossKillCount >= entry.bossKills;
-        if (byKills || byBoss) {
-          weaponUnlocked[entry.idx] = true;
-          showWeaponUnlockMsg(entry.label);
-          updateQuestHud();
-          changed = true;
-        }
-      }
-      if (changed) persistUnlocks();
-    }
+    /** Unlock ladder removed — every gun is available from the start. No-op so the kill /
+     *  boss handlers that call it need no changes. */
+    function checkWeaponUnlocks() {}
 
     function showWeaponUnlockMsg(label) {
       const msg = document.createElement("div");
@@ -7088,21 +7177,11 @@
         return;
       }
       el.style.display = "block";
-      let html = '<b style="color:#ffd700;font-size:14px;">— 主线任务 —</b><br>';
-      const tasks = [
-        { label: "霰弹枪", need: `击杀 ${Math.min(totalKillCount, 10)}/10`, done: weaponUnlocked[2], key: "2" },
-        { label: "冲锋枪", need: `击杀 ${Math.min(totalKillCount, 20)}/20`, done: weaponUnlocked[3], key: "3" },
-        { label: "突击步枪", need: `击杀 ${Math.min(totalKillCount, 30)}/30`, done: weaponUnlocked[1], key: "4" },
-        { label: "反器材狙击枪", need: `Boss ${Math.min(bossKillCount, 1)}/1`, done: weaponUnlocked[5], key: "5" },
-        { label: "麻醉针", need: `Boss ${Math.min(bossKillCount, 2)}/2`, done: weaponUnlocked[6], key: "6" },
-      ];
-      for (const t of tasks) {
-        if (t.done) {
-          html += `<span style="color:#4fd1ff;">✓ ${t.label} [${t.key}]</span><br>`;
-        } else {
-          html += `<span style="color:#aaa;">○ ${t.label} — ${t.need}</span><br>`;
-        }
-      }
+      // The weapon-unlock checklist used to live here. With the ladder gone there is
+      // nothing to track, so the quest HUD stays hidden instead of showing an empty box.
+      el.style.display = "none";
+      return;
+      let html = "";
       el.innerHTML = html;
     }
 
@@ -8886,9 +8965,39 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
     }
 
     /** 1–4 号枪：backup 分层枪声；AMR(5) 走 playAmrGunSound（轰鸣+滚动尾音）。 */
+    /** SMG voice with a suppressed low thump under it — same family, obviously heavier. */
+    function playAsValGunSound(w) {
+      const skin = (w && w.soundSkin) || "divineSpectre";
+      if (typeof GunSFX !== "undefined" && GunSFX.shot) GunSFX.shot(skin);
+      if (!audioCtx || !audioSfx) return;
+      const t0 = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(148, t0);
+      osc.frequency.exponentialRampToValueAtTime(58, t0 + 0.085);
+      const og = audioCtx.createGain();
+      og.gain.setValueAtTime(0.0001, t0);
+      og.gain.exponentialRampToValueAtTime(0.30, t0 + 0.006);
+      og.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.11);
+      osc.connect(og); og.connect(audioSfx);
+      try { osc.start(t0); osc.stop(t0 + 0.12); } catch (_) {}
+      const src = audioCtx.createBufferSource();
+      src.buffer = getGunNoiseBuffer(0.09);
+      const lp = audioCtx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.setValueAtTime(1150, t0);
+      const ng = audioCtx.createGain();
+      ng.gain.setValueAtTime(0.0001, t0);
+      ng.gain.exponentialRampToValueAtTime(0.16, t0 + 0.004);
+      ng.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.09);
+      src.connect(lp); lp.connect(ng); ng.connect(audioSfx);
+      try { src.start(t0); src.stop(t0 + 0.10); } catch (_) {}
+    }
+
     function playGunSound(w) {
       if (audioCtx.state === "suspended") void audioCtx.resume();
       if (state.weaponIndex === 4) return;
+      if (state.weaponIndex === 9) { playAsValGunSound(w); return; }
       if (state.weaponIndex === 5) {
         playAmrGunSound();
         return;
@@ -9394,6 +9503,20 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           fr(0.34,0.48,0.10,0.42,MB,3);  // magazine (curved)
           fr(0.48,0.18,0.16,0.10,MB,1);  // carry handle
           break;}
+        case 9:{ // AS Val — suppressed rifle, side-rail optic ─────────────
+          fr(0.14,0.20,0.50,0.28,M,2);   // receiver
+          fr(0.62,0.18,0.36,0.20,MD,2);  // integral suppressor (fat)
+          fr(0.66,0.16,0.02,0.24,MB);    // shroud rings
+          fr(0.74,0.16,0.02,0.24,MB);
+          fr(0.82,0.16,0.02,0.24,MB);
+          fr(0.02,0.24,0.12,0.06,ML,1);  // skeleton stock rail
+          fr(0.02,0.36,0.12,0.06,ML,1);
+          fr(0.00,0.22,0.04,0.22,MD,1);  // butt pad
+          fr(0.24,0.46,0.10,0.38,MD,2);  // grip
+          fr(0.34,0.48,0.10,0.42,MB,3);  // magazine
+          fr(0.26,0.08,0.26,0.11,'#1a1a2e',2); // optic body
+          fr(0.48,0.09,0.05,0.09,BL,1);  // lens
+          break;}
         case 4:{ // Med Kit ───────────────────────────────────────────────
           fr(0.18,0.08,0.64,0.80,RD,4);  // body
           fr(0.22,0.42,0.56,0.18,WH,1);  // cross H
@@ -9744,7 +9867,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
     // Reset hotbar
     document.getElementById("btnResetHotbar")?.addEventListener("click", () => {
-      gameSettings.weaponSlotOrder = [0, 2, 3, 1, 5, 6, 4, 7];
+      gameSettings.weaponSlotOrder = [0, 2, 3, 1, 5, 6, 4, 7, 9];
       saveGameSettings();
       _buildHotbarSettings();
       _buildInvBar();
@@ -11440,6 +11563,36 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         gunGroup.add(muzzleNode);
         root.userData.muzzleNode = muzzleNode;
 
+      } else if (type === 9) {
+        // AS Val: integrally suppressed rifle — fat shroud over most of the length,
+        // skeleton stock, rail optic. Reads clearly apart from the AR at a glance.
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.11, 0.12, 0.40), mDark, 0, 0.02, 0.16);
+        addMeshPart(gunGroup, new THREE.CylinderGeometry(0.046, 0.046, 0.56, 12), mBlack, 0, 0.055, -0.20, barrelZ, 0, 0);
+        addMeshPart(gunGroup, new THREE.CylinderGeometry(0.049, 0.049, 0.06, 12), mMetal, 0, 0.055, -0.46, barrelZ, 0, 0);
+        for (let i = 0; i < 5; i++) {
+          addMeshPart(gunGroup, new THREE.CylinderGeometry(0.050, 0.050, 0.012, 12), mDark, 0, 0.055, -0.06 - i * 0.09, barrelZ, 0, 0);
+        }
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.07, 0.20, 0.10), mDark, 0, -0.16, 0.12);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.05, 0.13, 0.08), mBlack, 0, -0.07, -0.02);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.018, 0.02, 0.30), mMetal, -0.03, 0.05, 0.44);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.018, 0.02, 0.30), mMetal, 0.03, 0.05, 0.44);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.09, 0.11, 0.04), mBlack, 0, 0.02, 0.60);
+        addMeshPart(gunGroup, new THREE.BoxGeometry(0.05, 0.05, 0.06), mDark, 0, 0.11, 0.10);
+        addMeshPart(gunGroup, new THREE.CylinderGeometry(0.028, 0.028, 0.20, 10), mDark, 0, 0.145, 0.02, barrelZ, 0, 0);
+        addMeshPart(gunGroup, new THREE.CylinderGeometry(0.026, 0.026, 0.012, 10), mSight, 0, 0.145, 0.115, barrelZ, 0, 0);
+        addMeshPart(gunGroup, new THREE.SphereGeometry(0.005, 8, 8), mDot, 0, 0.145, 0.108);
+        attachEjectPort(gunGroup, root, 0.052, 0.09, 0.10);
+        attachWeaponMag(gunGroup, root, 0, -0.13, 0.08, 0.052, 0.17, 0.09);
+        gunGroup.position.set(0.25, -0.22, -0.80);
+        attachViewHandGrips(gunGroup, root, VIEW_HAND_GRIPS[1]);
+        attachViewArmsOnGrips(root);
+        adsOffset.set(-0.25, 0.032, 0.30);
+
+        const muzzleNodeV = new THREE.Object3D();
+        muzzleNodeV.position.set(0, 0.055, -0.50);
+        gunGroup.add(muzzleNodeV);
+        root.userData.muzzleNode = muzzleNodeV;
+
       } else if (type === 2) {
         addMeshPart(gunGroup, new THREE.BoxGeometry(0.12, 0.13, 0.26), mWoodD, 0, 0, 0.5);
         addMeshPart(gunGroup, new THREE.BoxGeometry(0.10, 0.08, 0.14), mWoodD, 0, -0.055, 0.38);
@@ -12050,6 +12203,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       makeBlindDartModel(),
       makeKnifeModel(),
       makeDevGunModel(),
+      makeWeaponModel(9),
     ];
 
     weaponModels.forEach((w, i) => {
@@ -12066,7 +12220,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
      * already used elsewhere in the file.
      */
     function getMedKitHealDuration() {
-      return isPvpCrossfireMap(CURRENT_MAP) ? 5 : 8;
+      return (isPvpCrossfireMap(CURRENT_MAP) ? 5 : 8) * myVest().actionMul;
     }
     const MED_KIT_RING_LEN = 2 * Math.PI * 44;
     const MED_KIT_DEFILL_DURATION = 0.18;
@@ -12871,7 +13025,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       state.reloading = true;
       state.ads = false;
       state.reloadStartAmmo = w.ammo;
-      state.reloadEnd = performance.now() + w.reloadTime * getDartSlowReloadMult();
+      // Vests slow every hand action: reloads, med-kit use, strapping the harness on.
+      state.reloadEnd = performance.now() + w.reloadTime * getDartSlowReloadMult() * myVest().actionMul;
       playReloadSound();
       updateHud();
     }
@@ -12961,7 +13116,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           showCombatFeedback(tr("jetBusy", "STRAPPING IN..."), "#88ccff", 0.25);
         } else if (nowC < state.dashDisabledUntil) {
           showCombatFeedback("DASH LOCKED " + Math.ceil((state.dashDisabledUntil - nowC) / 1000) + "s", "#ff4422", 0.25);
-        } else if (state.stamina < (isJetActive() ? STAMINA_JET_DASH_COST : STAMINA_DASH_COST)) {
+        } else if (!isJetActive() && state.stamina < STAMINA_DASH_COST) {
           showCombatFeedback(tr("staminaEmpty", "OUT OF STAMINA"), "#ffb21f", 0.25);
         } else if (nowC >= state.dashCooldownEnd) {
           // True velocity-based dash. DASH_DIST units over DASH_DURATION_MS (≈200ms —
@@ -13007,8 +13162,12 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           if (jetting) playJetBurstSound();
           else playDashSound();
           state.dashCooldownEnd = nowC + 350;
-          state.stamina = Math.max(0, state.stamina - (jetting ? STAMINA_JET_DASH_COST : STAMINA_DASH_COST));
-          state.staminaRegenAt = nowC + STAMINA_REGEN_DELAY_MS;
+          // Flight is free of stamina by design — the harness is limited by its own 10 s
+          // window plus JET_COOLDOWN_MS, not by the ground-mobility budget.
+          if (!jetting) {
+            state.stamina = Math.max(0, state.stamina - STAMINA_DASH_COST);
+            state.staminaRegenAt = nowC + STAMINA_REGEN_DELAY_MS;
+          }
           state.camShake = Math.max(state.camShake, jetting ? 0.1 : 0.06);
           e.preventDefault();
         }
@@ -13556,73 +13715,81 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
      * Boxes fit a box-built model exactly, so they simply do not have this failure mode.
      * Extents below are read off the mesh positions in makeHormoneZombie().
      */
-    /** Children of root: the legs. Tested in root space. */
-    const BOSS_LEG_BOXES = [
-      { x0: 0.08, x1: 0.52, y0: -0.38, y1: 0.70, z0: -0.55, z1: 0.55, zone: "leg" },
-      { x0: -0.52, x1: -0.08, y0: -0.38, y1: 0.70, z0: -0.55, z1: 0.55, zone: "leg" },
-    ];
-    /** Children of torsoRoot: head, trunk, arms. Tested in TORSO space so they follow the hunch. */
-    const BOSS_TORSO_BOXES = [
-      // skull + brow + nose + ears, headGroup at (0, 1.96, 0.50).
-      // Lower bound is the SKULL floor (1.72), not the jaw (1.63): the head is hunched
-      // forward over the chest, so a jaw-height box hangs in front of the upper torso and
-      // a level shot aimed at the middle of the chest clips it on the way in and scores a
-      // headshot. Trimming to the skull keeps chest shots as body hits.
-      { x0: -0.32, x1: 0.32, y0: 1.72, y1: 2.24, z0: 0.22, z1: 0.82, zone: "head" },
-      // Torso is split at the waist. One box for the whole trunk had to be as deep as the
-      // chest (z 0.62), which left ~0.8 world units of air in front of the much thinner
-      // belly still reading as a body hit.
-      { x0: -0.70, x1: 0.70, y0: 1.15, y1: 2.24, z0: -0.45, z1: 0.62, zone: "body" },  // chest + back + traps
-      { x0: -0.45, x1: 0.45, y0: 0.58, y1: 1.15, z0: -0.28, z1: 0.32, zone: "body" },  // midriff + belly + hip
-      // arms hang wide off the shoulders at x ±0.80
-      { x0: 0.55, x1: 1.30, y0: 0.75, y1: 2.05, z0: -0.35, z1: 0.50, zone: "body" },
-      { x0: -1.30, x1: -0.55, y0: 0.75, y1: 2.05, z0: -0.35, z1: 0.50, zone: "body" },
+    /**
+     * Boss hit volumes, one list per RIG GROUP, each box in that group's OWN local space.
+     *
+     * Two earlier attempts failed the same way: pin the boxes to one space, then inflate
+     * them to cover parts that actually move in a different one. Inflated boxes ARE the
+     * "shoot the air, still deal damage" bug. The legs carried z −0.55..0.55 (1.10 deep) to
+     * cover their swing while a real leg is ~0.44 deep — about 0.66 WORLD units of empty air
+     * in front of and behind each leg still scored a leg hit. The arms had the same slack.
+     *
+     * Testing each part in its own group lets the box hug the meshes AND follow the
+     * animation exactly, because the group *is* the animation.
+     */
+    const BOSS_PART_BOXES = [
+      ["torsoRoot", [
+        // headGroup (0, 1.96, 0.50) rot.x 0.25; skull 0.42×0.46×0.42 plus brow / nose / ears.
+        // The floor sits just above the skull bottom, not at the jaw: the head hangs forward
+        // over the chest, so a jaw-height box intercepts level shots aimed at the middle of
+        // the chest and turns them into headshots.
+        { x0: -0.30, x1: 0.30, y0: 1.74, y1: 2.24, z0: 0.24, z1: 0.78, zone: "head" },
+        // Chest and back are two offset slabs, not one block: the chest sits forward
+        // (z −0.18..0.62) and the back + traps sit behind and higher (z −0.46..0.24).
+        // A single box spanning both leaves the corner in front of the traps, and the
+        // corner behind the lower chest, as air that still counted as a body hit.
+        { x0: -0.66, x1: 0.66, y0: 1.18, y1: 1.92, z0: -0.20, z1: 0.62, zone: "body" },  // chest + pecs
+        { x0: -0.62, x1: 0.62, y0: 1.50, y1: 2.22, z0: -0.46, z1: 0.24, zone: "body" },  // back + traps + neck
+        { x0: -0.42, x1: 0.42, y0: 0.60, y1: 1.24, z0: -0.24, z1: 0.24, zone: "body" },
+      ]],
+      ["leftArmRoot",      [{ x0: -0.27, x1: 0.27, y0: -0.64, y1: 0.14, z0: -0.30, z1: 0.30, zone: "body" }]],
+      ["rightArmRoot",     [{ x0: -0.27, x1: 0.27, y0: -0.64, y1: 0.14, z0: -0.30, z1: 0.30, zone: "body" }]],
+      ["leftForearmRoot",  [{ x0: -0.23, x1: 0.23, y0: -0.80, y1: 0.13, z0: -0.20, z1: 0.28, zone: "body" }]],
+      ["rightForearmRoot", [{ x0: -0.23, x1: 0.23, y0: -0.80, y1: 0.13, z0: -0.20, z1: 0.28, zone: "body" }]],
+      ["leftLegRoot",      [{ x0: -0.19, x1: 0.19, y0: -0.50, y1: 0.04, z0: -0.19, z1: 0.28, zone: "leg" }]],
+      ["rightLegRoot",     [{ x0: -0.19, x1: 0.19, y0: -0.50, y1: 0.04, z0: -0.19, z1: 0.28, zone: "leg" }]],
+      ["leftShinRoot",     [{ x0: -0.17, x1: 0.17, y0: -0.56, y1: 0.10, z0: -0.24, z1: 0.26, zone: "leg" }]],
+      ["rightShinRoot",    [{ x0: -0.17, x1: 0.17, y0: -0.56, y1: 0.10, z0: -0.24, z1: 0.26, zone: "leg" }]],
     ];
 
+    /**
+     * Boss ray test. Every rig group inherits the same uniform scale from the root, so a
+     * local t is directly comparable across groups; only the winner is converted to world.
+     */
+    function bossHitAlongRay(raycaster, enemy, pad = 1) {
+      let bestT = Infinity, bestZone = null, bestGroup = null;
+      for (let pi = 0; pi < BOSS_PART_BOXES.length; pi++) {
+        const g = enemy[BOSS_PART_BOXES[pi][0]];
+        if (!g) continue;
+        g.updateMatrixWorld(true);
+        _invEnemyMat.copy(g.matrixWorld).invert();
+        _ehLo.copy(raycaster.ray.origin).applyMatrix4(_invEnemyMat);
+        _ehLd.copy(raycaster.ray.direction).transformDirection(_invEnemyMat).normalize();
+        const boxes = BOSS_PART_BOXES[pi][1];
+        for (let bi = 0; bi < boxes.length; bi++) {
+          const t = rayBoxParam(_ehLo.x, _ehLo.y, _ehLo.z, _ehLd.x, _ehLd.y, _ehLd.z, boxes[bi], pad);
+          if (t !== null && t < bestT) { bestT = t; bestZone = boxes[bi].zone; bestGroup = g; }
+        }
+      }
+      if (bestZone === null) return null;
+      _invEnemyMat.copy(bestGroup.matrixWorld).invert();
+      _ehLo.copy(raycaster.ray.origin).applyMatrix4(_invEnemyMat);
+      _ehLd.copy(raycaster.ray.direction).transformDirection(_invEnemyMat).normalize();
+      _ehHitWorld.copy(_ehLd).multiplyScalar(bestT).add(_ehLo).applyMatrix4(bestGroup.matrixWorld);
+      const wT = _ehHitWorld.distanceTo(raycaster.ray.origin);
+      const mT = (typeof raycaster.far === "number" && raycaster.far > 0) ? raycaster.far : Infinity;
+      if (wT < -0.02 || wT > mT + 0.04) return null;
+      return { t: wT, zone: bestZone, point: _ehHitWorld.clone() };
+    }
+
     /** Head / torso / leg spheres in humanoid root space (zombies + remote PvP avatars). */
-    function humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, pad = 1, torsoGroup = null) {
+    function humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, pad = 1) {
       rootGroup.updateMatrixWorld(true);
       _invEnemyMat.copy(rootGroup.matrixWorld).invert();
       _ehLo.copy(raycaster.ray.origin).applyMatrix4(_invEnemyMat);
       _ehLd.copy(raycaster.ray.direction).transformDirection(_invEnemyMat).normalize();
       let bestLocalT = Infinity;
       let zone = null;
-      if (isBossEnemy) {
-        // Legs hang off the ROOT, so they are tested in root space.
-        for (let vi = 0; vi < BOSS_LEG_BOXES.length; vi++) {
-          const b = BOSS_LEG_BOXES[vi];
-          const t = rayBoxParam(_ehLo.x, _ehLo.y, _ehLo.z, _ehLd.x, _ehLd.y, _ehLd.z, b, pad);
-          if (t !== null && t < bestLocalT) { bestLocalT = t; zone = b.zone; }
-        }
-        // Head / chest / arms are children of torsoRoot, which carries the 0.18 rad HUNCH
-        // (plus lean and bob). Tested in ROOT space they were badly out of place: the hunch
-        // swings the head from (y 1.96, z 0.50) to (y 1.84, z 0.84) — 0.34 root units, i.e.
-        // 0.68 WORLD units forward at the boss's 2.0 scale, which put the real head outside
-        // the head box entirely. The old oversized spheres hid this by covering it anyway.
-        // Testing in torso space makes the zones follow the pose exactly.
-        const tg = torsoGroup || rootGroup;
-        if (tg !== rootGroup) {
-          tg.updateMatrixWorld(true);
-          _invEnemyMat.copy(tg.matrixWorld).invert();
-          _ehLo.copy(raycaster.ray.origin).applyMatrix4(_invEnemyMat);
-          _ehLd.copy(raycaster.ray.direction).transformDirection(_invEnemyMat).normalize();
-        }
-        for (let vi = 0; vi < BOSS_TORSO_BOXES.length; vi++) {
-          const b = BOSS_TORSO_BOXES[vi];
-          const t = rayBoxParam(_ehLo.x, _ehLo.y, _ehLo.z, _ehLd.x, _ehLd.y, _ehLd.z, b, pad);
-          // Local t is a distance in the same units for both spaces (uniform scale), so the
-          // nearest-wins comparison across the two spaces is valid.
-          if (t !== null && t < bestLocalT) { bestLocalT = t; zone = b.zone; }
-        }
-        if (zone === null) return null;
-        // Re-derive the world point from whichever space produced the winner.
-        _ehHitWorld.copy(_ehLd).multiplyScalar(bestLocalT).add(_ehLo);
-        _ehHitWorld.applyMatrix4(tg !== rootGroup ? tg.matrixWorld : rootGroup.matrixWorld);
-        const wT = _ehHitWorld.distanceTo(raycaster.ray.origin);
-        const mT = (typeof raycaster.far === "number" && raycaster.far > 0) ? raycaster.far : Infinity;
-        if (wT < -0.02 || wT > mT + 0.04) return null;
-        return { t: wT, zone, point: _ehHitWorld.clone() };
-      }
       {
         const volumes = [
           { cx: 0, cy: 1.82, cz: 0, r: 0.3, zone: "head" },
@@ -13652,7 +13819,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
     /** Hit volumes are fixed in zombie root space so torso sway does not move hitboxes. */
     function enemyHitAlongRay(raycaster, enemy) {
-      return humanoidHitAlongRay(raycaster, enemy.group, !!enemy.isBoss, 1, enemy.torsoRoot || null);
+      if (enemy.isBoss) return bossHitAlongRay(raycaster, enemy, 1);
+      return humanoidHitAlongRay(raycaster, enemy.group, false, 1);
     }
 
     function applyDamage(enemy, zone, w) {
@@ -14043,14 +14211,16 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         showCombatFeedback(tr("jetAlreadyOn", "HARNESS ALREADY ON"), "#66ccff", 0.4);
         return;
       }
-      if (jt.charges <= 0) {
-        showCombatFeedback(tr("jetNoCharge", "NO HARNESS"), "#ff4422", 0.4);
+      const nowJ = performance.now();
+      if (nowJ < (jt.cooldownUntil || 0)) {
+        showCombatFeedback(
+          tr("jetCooling", "HARNESS COOLING") + " " + Math.ceil((jt.cooldownUntil - nowJ) / 1000) + "s",
+          "#ff9422", 0.4);
         return;
       }
-      jt.charges--;
       jt.phase = "strapping";
       jt.startMs = performance.now();
-      jt.endMs = jt.startMs + JET_STRAP_MS;
+      jt.endMs = jt.startMs + JET_STRAP_MS * myVest().actionMul;
       jt.netState = 1;
       // Strapping in means both hands are busy: drop ADS and stop any burst.
       state.ads = false;
@@ -14128,6 +14298,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           jt.phase = "idle";
           jt.netState = 0;
           jt.charges = 1;
+          jt.cooldownUntil = performance.now() + JET_COOLDOWN_MS;
           if (jetRoot) jetRoot.visible = false;
           showCombatFeedback(tr("jetExpired", "HARNESS BURNED OUT"), "#ff9922", 1.2);
         }
@@ -14298,7 +14469,10 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       let width = "0%";
       if (jt.phase === "strapping") {
         const p = jetPhaseProgress();
-        text = tr("jetStrapping", "STRAPPING IN...") + "  " + ((1 - p) * (JET_STRAP_MS / 1000)).toFixed(1) + "s";
+        // Span, not the constant: a heavy vest stretches the strap-in, and the countdown
+        // has to say so rather than lying about a flat 3 s.
+        const strapSpan = Math.max(1, jt.endMs - jt.startMs);
+        text = tr("jetStrapping", "STRAPPING IN...") + "  " + ((1 - p) * (strapSpan / 1000)).toFixed(1) + "s";
         width = (p * 100).toFixed(0) + "%";
       } else {
         const left = Math.max(0, jt.endMs - performance.now());
@@ -14519,10 +14693,15 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       p.mesh = null;
     }
 
-    function humanoidHitAlongRayPadded(raycaster, rootGroup, pad, isBossEnemy, torsoGroup = null) {
-      const hit = humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, 1, torsoGroup);
+    function humanoidHitAlongRayPadded(raycaster, rootGroup, pad, isBossEnemy, enemyOpt = null) {
+      if (isBossEnemy && enemyOpt) {
+        const h = bossHitAlongRay(raycaster, enemyOpt, 1);
+        if (h || pad <= 1.001) return h;
+        return bossHitAlongRay(raycaster, enemyOpt, pad);
+      }
+      const hit = humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, 1);
       if (hit || pad <= 1.001) return hit;
-      return humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, pad, torsoGroup);
+      return humanoidHitAlongRay(raycaster, rootGroup, isBossEnemy, pad);
     }
 
     function probeParalysisDartProximityHit(worldPos, hitPad, slowDuration, muzzleOpt) {
@@ -14630,7 +14809,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
             for (const enemy of state.enemies) {
               if (!enemyBlockingHits(enemy)) continue;
               enemy.group.updateMatrixWorld(true);
-              const hit = humanoidHitAlongRayPadded(segRay, enemy.group, hitPad, !!enemy.isBoss);
+              const hit = humanoidHitAlongRayPadded(segRay, enemy.group, hitPad, !!enemy.isBoss, enemy);
               if (hit) {
                 createSparks(hit.point || p.pos.clone(), 0x6bd4ff);
                 if (enemy.trainingDummy) {
@@ -14728,7 +14907,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
         if (!enemyBlockingHits(enemy)) continue;
         enemy.group.updateMatrixWorld(true);
         const eh = enemy.trainingDummy
-          ? humanoidHitAlongRayPadded(ray, enemy.group, 1.45, !!enemy.isBoss)
+          ? humanoidHitAlongRayPadded(ray, enemy.group, 1.45, !!enemy.isBoss, enemy)
           : enemyHitAlongRay(ray, enemy);
         if (eh && eh.t < bestEnemyT) {
           bestEnemy = enemy;
@@ -15004,7 +15183,9 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
 
         const movingPenalty = (keys.w || keys.a || keys.s || keys.d) ? 1.25 : 1;
         // ADS penalty blends with the same adsAccuracy so the steadying kicks in as the animation finishes.
-        const adsPenalty = THREE.MathUtils.lerp(1.8, 1.0, adsAccuracy);
+        // A weapon may pull the cone BELOW its hip value once fully scoped (AS Val 0.55).
+        // Without adsSpreadMul the floor is 1.0 — ADS only cancels the hip penalty.
+        const adsPenalty = THREE.MathUtils.lerp(1.8, (w.adsSpreadMul ?? 1.0), adsAccuracy);
         let totalSpread;
         if (state.weaponIndex === 5) {
           const adsReady = shootingAds && state.adsProgress >= adsReadyThr;
@@ -15170,6 +15351,13 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           let dmg = w.damageBody;
           if (bestRpZone === "head") dmg = w.damageHead;
           else if (bestRpZone === "leg") dmg = w.damageLegs;
+          // Price the shot against the victim's armour HERE, on the shooter: the relay
+          // rewrites custom fields and `damage` is the one it passes through verbatim.
+          // The victim broadcasts its armour in `move`, so we already know what they wear.
+          {
+            const vrp = remotePlayers.get(bestRpId);
+            if (vrp) dmg = applyArmorToDamage(dmg, bestRpZone, vrp.armorHelmet | 0, vrp.armorVest | 0, state.weaponIndex);
+          }
           const rpVictim = remotePlayers.get(bestRpId);
           let predictedKill = false;
           if (rpVictim && !rpVictim.isDown) {
@@ -15426,7 +15614,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       );
 
       const adsFov = Math.min(88, Math.max(28, weapon().adsFov ?? 55));
-      const targetFov = usingAds ? adsFov : 75;
+      // Helmets narrow the field of view — the higher the tier, the more you give up.
+      const targetFov = (usingAds ? adsFov : 75) * myHelmet().fovMul;
       if (camera.fov !== targetFov) {
         camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 10);
         camera.updateProjectionMatrix();
@@ -15528,7 +15717,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       if (move.lengthSq() > 0) {
         const _ndPhase = state.speedNeedle.phase;
         const _ndMult = (_ndPhase === 'boost' ? 2.0 : _ndPhase === 'weak' ? 0.25 : 1.0)
-          * (1 - (1 - CROUCH_SPEED_MUL) * crouchAmt);
+          * (1 - (1 - CROUCH_SPEED_MUL) * crouchAmt)
+          * myVest().speedMul;   // heavier vest, slower walk
         // Normalize first so we can capture the unit direction for the dash before
         // scaling by speed*dt. (State lookup is one branch cheaper than re-normalizing.)
         move.normalize();
@@ -15657,6 +15847,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           // Crouch depth 0..100, so opponents see the same posture — and the same smaller
           // silhouette — you do. Absent on older clients → 0 → standing.
           crouch: Math.round(crouchAmt * 100),
+          // Packed helmet/vest so shooters can compute mitigation before emitting a hit.
+          arm: packArmor(),
         });
       }
     }
@@ -15786,9 +15978,11 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       camera.updateProjectionMatrix();
     }
 
-    function damagePlayer(amount, attacker) {
+    function damagePlayer(amount, attacker, zone = "body", widx = -1) {
       if (player.health <= 0) return;
       if (performance.now() < player.spawnProtectUntil) return;
+      // Armour is applied here so every incoming source funnels through one place.
+      amount = applyArmorToDamage(amount, zone, armorHelmet, armorVest, widx);
       player.health = Math.max(0, player.health - amount);
       player.regenTimer = 0;
       // ── Speed Needle interrupt: boost breaks on hit ──────────────────────
@@ -18351,6 +18545,7 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
      */
     let _loadoutPanel = null;
     let _loadoutCards = [];
+    let _armorCards = { helmet: [], vest: [] };
 
     function loadoutCardStyle(selected, locked) {
       const base = "display:flex;flex-direction:column;align-items:center;gap:6px;width:120px;"
@@ -18407,10 +18602,37 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       fixed.style.cssText = "font:600 12px/1.7 Audiowide,Arial,sans-serif;color:#9fb0c0;"
         + "border-top:1px solid rgba(255,255,255,0.12);padding-top:10px;max-width:560px;margin:0 auto;";
 
+      // ── Armour rows ────────────────────────────────────────────────────
+      const armorWrap = document.createElement("div");
+      armorWrap.style.cssText = "border-top:1px solid rgba(255,255,255,0.12);padding-top:12px;margin-top:2px;";
+      _armorCards = { helmet: [], vest: [] };
+      const mkRow = (kind, table, labelTxt) => {
+        const rowLbl = document.createElement("div");
+        rowLbl.style.cssText = "font:600 12px/1.6 Audiowide,Arial,sans-serif;color:#9fb0c0;letter-spacing:2px;margin-bottom:4px;";
+        rowLbl.textContent = labelTxt;
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-bottom:12px;";
+        table.forEach((piece, i) => {
+          const c = document.createElement("div");
+          c.addEventListener("click", () => {
+            if (kind === "helmet") armorHelmet = i; else armorVest = i;
+            saveArmor();
+            syncLoadoutPanel();
+          });
+          row.appendChild(c);
+          _armorCards[kind].push({ el: c, i, piece });
+        });
+        armorWrap.appendChild(rowLbl);
+        armorWrap.appendChild(row);
+      };
+      mkRow("helmet", ARMOR_HELMETS, tr("armorHelmetRow", "HELMET  —  head protection · narrows view · dulls hit direction"));
+      mkRow("vest", ARMOR_VESTS, tr("armorVestRow", "VEST  —  body/leg protection · slower move, reload and item use"));
+
       panel.appendChild(back);
       panel.appendChild(h);
       panel.appendChild(desc);
       panel.appendChild(grid);
+      panel.appendChild(armorWrap);
       panel.appendChild(fixed);
       wrap.appendChild(panel);
       _loadoutPanel = panel;
@@ -18444,8 +18666,28 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
       syncLoadoutPanel();
     }
 
+    function syncArmorCards() {
+      const pct = (v) => (v * 100).toFixed(0) + "%";
+      for (const kind of ["helmet", "vest"]) {
+        const cur = kind === "helmet" ? armorHelmet : armorVest;
+        for (const { el, i, piece } of _armorCards[kind]) {
+          const sel = i === cur;
+          el.style.cssText = loadoutCardStyle(sel, false) + "width:132px;";
+          const cost = kind === "helmet"
+            ? `${tr("armorFov", "view")} ${pct(piece.fovMul)} · ${tr("armorSense", "sense")} ${pct(piece.hitFade)}`
+            : `${tr("armorSpeed", "speed")} ${pct(piece.speedMul)} · ${tr("armorAction", "actions")} ${pct(1 / piece.actionMul)}`;
+          el.innerHTML =
+            `<div style="font-size:13px;">${piece.name}</div>` +
+            `<div style="color:#7ef5a0;font-size:11px;">−${pct(piece.mit)} ${tr("armorDmg", "dmg")}</div>` +
+            (i === 0 ? `<div style="color:#7a8694;font-size:10px;">${tr("armorNoPenalty", "no penalty")}</div>`
+                     : `<div style="color:#e8a06a;font-size:10px;">${cost}</div>`);
+        }
+      }
+    }
+
     function syncLoadoutPanel() {
       if (!_loadoutPanel) return;
+      syncArmorCards();
       sanitizeLoadoutSelection();
       for (const { card, nm, widx } of _loadoutCards) {
         const locked = !weaponUnlocked[widx];
