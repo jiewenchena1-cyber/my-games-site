@@ -1700,9 +1700,33 @@
       // our broadcast armour (the relay only passes `damage` through verbatim), so applying
       // it again would double-dip. Every other relayed source — co-op zombie hits forwarded
       // by the host — arrives RAW, and used to ignore armour completely.
-      let netDmg = data.damage || 0;
-      if (!isPvp) netDmg = applyArmorToDamage(netDmg, "body", armorHelmet, armorVest, -1);
-      reportArmorAbsorb((data.damage || 0) - netDmg);
+      const rawNet = data.damage || 0;
+      let netDmg = rawNet;
+      {
+        // Armour is applied HERE, on the victim, because only the victim reliably knows its
+        // own kit. Everything needed survives the relay:
+        //   • `damage`  — passed through verbatim (the payload is raw now)
+        //   • `weapon`  — the attacker's current weapon, kept in their `move`
+        // The zone is recovered by matching the raw damage against that weapon's own
+        // head/body/leg numbers, which is exact because the shooter sends them unmodified.
+        let widx = -1;
+        let zone = "body";
+        if (isPvp) {
+          const arp = attackerId != null ? remotePlayers.get(attackerId) : null;
+          if (arp) {
+            widx = arp.currentWeapon | 0;
+            const aw = weapons[widx];
+            if (aw) {
+              if (Math.abs(rawNet - aw.damageHead) < 0.51) zone = "head";
+              else if (Math.abs(rawNet - aw.damageLegs) < 0.51) zone = "leg";
+            }
+          }
+        }
+        // Non-PvP relayed damage is a co-op zombie hit forwarded by the host: no gun
+        // behind it, so it takes the plain 1.0 armour multiplier.
+        netDmg = applyArmorToDamage(rawNet, zone, armorHelmet, armorVest, widx);
+      }
+      reportArmorAbsorb(rawNet - netDmg);
       player.health = Math.max(0, player.health - netDmg);
       player.regenTimer = 0;
       state.flashTimer = 0.14;
@@ -14984,6 +15008,8 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           }
         }
         if (MULTIPLAYER) {
+          // Raw, like bullets — the victim applies armour. The knife used to skip armour
+          // entirely because it never went through any mitigation path at all.
           socket.emit("hit", {
             target: bestRpId,
             damage: dmg,
@@ -15390,13 +15416,11 @@ ${hudMapLabel}: ${mapLabel}${MULTIPLAYER ? hudMpTag : ""}<br>
           let dmg = w.damageBody;
           if (bestRpZone === "head") dmg = w.damageHead;
           else if (bestRpZone === "leg") dmg = w.damageLegs;
-          // Price the shot against the victim's armour HERE, on the shooter: the relay
-          // rewrites custom fields and `damage` is the one it passes through verbatim.
-          // The victim broadcasts its armour in `move`, so we already know what they wear.
-          {
-            const vrp = remotePlayers.get(bestRpId);
-            if (vrp) dmg = applyArmorToDamage(dmg, bestRpZone, vrp.armorHelmet | 0, vrp.armorVest | 0, state.weaponIndex);
-          }
+          // Raw damage goes on the wire. Pricing it here (v18) could never work: the relay
+          // forwards ONLY id/x/y/z/yaw/name/weapon from `move` and drops every custom field,
+          // so `arm` never arrived and every opponent looked unarmoured. Measured with two
+          // live clients — the armoured player broadcast h3/v3 and the shooter read h0/v0.
+          // The victim applies its own armour instead; see socket.on("damaged").
           const rpVictim = remotePlayers.get(bestRpId);
           let predictedKill = false;
           if (rpVictim && !rpVictim.isDown) {
